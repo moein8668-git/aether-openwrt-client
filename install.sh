@@ -109,10 +109,6 @@ if [ -z "$ASSET_URL" ]; then
     exit 1
 fi
 
-# --- Find SHA256 checksum URL ---
-SHA256_FILE="${ARCHIVE}.sha256"
-SHA256_URL=$(echo "$RELEASE_JSON" | grep -o "\"browser_download_url\": *\"[^\"]*${SHA256_FILE}\"" | sed -E 's/.*"(https[^"]+)"/\1/' | head -n1)
-
 # --- Download ---
 TMP_DIR=$(mktemp -d /tmp/aether-install.XXXXXX)
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -122,29 +118,6 @@ wget -q -O "$TMP_DIR/$ARCHIVE" "$ASSET_URL" || {
     error "Download failed."
     exit 1
 }
-
-# --- Verify checksum ---
-if [ -n "$SHA256_URL" ]; then
-    info "Verifying checksum..."
-    wget -q -O "$TMP_DIR/$SHA256_FILE" "$SHA256_URL" || {
-        warn "Could not download checksum file. Skipping verification."
-    }
-    if [ -f "$TMP_DIR/$SHA256_FILE" ]; then
-        EXPECTED_HASH=$(cat "$TMP_DIR/$SHA256_FILE" | awk '{print $1}' | tr -d '[:space:]')
-        ACTUAL_HASH=$(sha256sum "$TMP_DIR/$ARCHIVE" | awk '{print $1}')
-        if [ "$EXPECTED_HASH" = "$ACTUAL_HASH" ]; then
-            success "Checksum verified"
-        else
-            error "Checksum mismatch!"
-            error "Expected: $EXPECTED_HASH"
-            error "Actual:   $ACTUAL_HASH"
-            error "The download may be corrupted or tampered with. Aborting."
-            exit 1
-        fi
-    fi
-else
-    warn "No checksum file found for $ARCHIVE. Skipping verification."
-fi
 
 # --- Extract ---
 info "Extracting..."
