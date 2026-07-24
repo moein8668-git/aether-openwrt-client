@@ -68,7 +68,7 @@ esac
 # --- Map to release archive name ---
 case "$ASSET_ARCH" in
     x86_64)  ARCHIVE="aether-linux-x86_64-musl.tar.gz" ;;
-    arm64)   ARCHIVE="aether-linux-arm64.tar.gz" ;;
+    arm64)   ARCHIVE="aether-linux-aarch64-musl.tar.gz" ;;
     armv7)   ARCHIVE="aether-linux-armv7-musl.tar.gz" ;;
 esac
 
@@ -142,7 +142,7 @@ if [ "$SKIP_CURL" -eq 0 ] && ! command -v curl >/dev/null 2>&1; then
         y|Y|yes|YES)
             info "Installing curl..."
             if command -v apk >/dev/null 2>&1; then
-                apk add --no-cache curl 2>/dev/null || warn "Could not install curl"
+                apk add curl 2>/dev/null || warn "Could not install curl"
             elif command -v opkg >/dev/null 2>&1; then
                 opkg update >/dev/null 2>&1
                 opkg install curl 2>/dev/null || warn "Could not install curl"
@@ -165,30 +165,43 @@ success "Installed /usr/bin/aether"
 killall aether 2>/dev/null || true
 sleep 1
 
-# --- Install config ---
-if [ -f /etc/config/aether ] && [ "$FORCE_CONFIG" -eq 0 ]; then
-    warn "Keeping existing /etc/config/aether"
-else
-    cp -f "$SCRIPT_DIR/files/etc/config/aether" /etc/config/aether
-    success "Installed /etc/config/aether"
-fi
+# --- Remote file helper ---
+# When install.sh is run standalone (downloaded to /tmp), the files/ directory
+# isn't available locally.  Fall back to fetching each file from GitHub Raw.
+RAW_BASE="https://raw.githubusercontent.com/moein8668-git/aether-openwrt-client/main/files"
 
-# --- Install files ---
-copy_file() {
-    local src="$1" dst="$2" mode="$3"
-    [ -f "$src" ] || return 0
+fetch_file() {
+    # fetch_file <repo-relative-path-under-files/> <destination> <mode>
+    local rel="$1" dst="$2" mode="$3"
+    local src_local="$SCRIPT_DIR/files/$rel"
     mkdir -p "$(dirname "$dst")"
-    cp -f "$src" "$dst"
+    if [ -f "$src_local" ]; then
+        cp -f "$src_local" "$dst"
+    else
+        wget -q -O "$dst" "$RAW_BASE/$rel" || {
+            error "Failed to download $rel"
+            rm -f "$dst"
+            return 1
+        }
+    fi
     [ -n "$mode" ] && chmod "$mode" "$dst"
     success "Installed $dst"
 }
 
-copy_file "$SCRIPT_DIR/files/etc/init.d/aether" /etc/init.d/aether 755
-copy_file "$SCRIPT_DIR/files/usr/bin/aether-ctl" /usr/bin/aether-ctl 755
-copy_file "$SCRIPT_DIR/files/usr/libexec/rpcd/luci-app-aether" /usr/libexec/rpcd/luci-app-aether 755
-copy_file "$SCRIPT_DIR/files/usr/share/rpcd/acl.d/luci-app-aether.json" /usr/share/rpcd/acl.d/luci-app-aether.json 644
-copy_file "$SCRIPT_DIR/files/usr/share/luci/menu.d/luci-app-aether.json" /usr/share/luci/menu.d/luci-app-aether.json 644
-copy_file "$SCRIPT_DIR/files/www/luci-static/resources/view/aether.js" /www/luci-static/resources/view/aether.js 644
+# --- Install config ---
+if [ -f /etc/config/aether ] && [ "$FORCE_CONFIG" -eq 0 ]; then
+    warn "Keeping existing /etc/config/aether"
+else
+    fetch_file "etc/config/aether" /etc/config/aether 644
+fi
+
+# --- Install files ---
+fetch_file "etc/init.d/aether" /etc/init.d/aether 755
+fetch_file "usr/bin/aether-ctl" /usr/bin/aether-ctl 755
+fetch_file "usr/libexec/rpcd/luci-app-aether" /usr/libexec/rpcd/luci-app-aether 755
+fetch_file "usr/share/rpcd/acl.d/luci-app-aether.json" /usr/share/rpcd/acl.d/luci-app-aether.json 644
+fetch_file "usr/share/luci/menu.d/luci-app-aether.json" /usr/share/luci/menu.d/luci-app-aether.json 644
+fetch_file "www/luci-static/resources/view/aether.js" /www/luci-static/resources/view/aether.js 644
 
 # --- Identity storage ---
 mkdir -p /etc/aether 2>/dev/null
