@@ -166,30 +166,50 @@ do_test() {
 	log_info "Testing $target via SOCKS5 ($socks)..."
 
 	# Use --socks5-hostname for DNS resolution through proxy
-	local start_time=$(date +%s)
-	local http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+	# curl -w gives us %{time_total} in seconds (float) for precise timing
+	local result http_code time_ms
+	result=$(curl -s -o /dev/null \
+		-w "%{http_code} %{time_total}" \
 		--socks5-hostname "$socks" \
 		--connect-timeout 10 --max-time 15 \
 		"https://$target" 2>/dev/null)
 	local exit_code=$?
-	local end_time=$(date +%s)
-	local elapsed=$((end_time - start_time))
 
-	if [ $exit_code -eq 0 ] && [ -n "$http_code" ] && [ "$http_code" != "000" ]; then
-		log_info "OK — $target responded (HTTP $http_code, ${elapsed}s)"
+	if [ $exit_code -ne 0 ] || [ -z "$result" ]; then
+		# Will fall through to HTTP fallback below
+		http_code=""
+		time_ms="15000"
+	else
+		http_code=$(echo "$result" | awk '{print $1}')
+		local time_s=$(echo "$result" | awk '{print $2}')
+		time_ms=$(awk -v t="$time_s" 'BEGIN{printf "%.0f", t*1000}')
+	fi
+
+	if [ -n "$http_code" ] && [ "$http_code" != "000" ]; then
+		log_info "OK ${http_code} ${time_ms}ms"
 	else
 		# Try http as fallback
-		http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+		result=$(curl -s -o /dev/null \
+			-w "%{http_code} %{time_total}" \
 			--socks5-hostname "$socks" \
 			--connect-timeout 10 --max-time 15 \
 			"http://$target" 2>/dev/null)
-		end_time=$(date +%s)
-		elapsed=$((end_time - start_time))
-		if [ $? -eq 0 ] && [ -n "$http_code" ] && [ "$http_code" != "000" ]; then
-			log_info "OK — $target responded (HTTP $http_code, ${elapsed}s)"
+		exit_code=$?
+
+		if [ $exit_code -ne 0 ] || [ -z "$result" ]; then
+			log_err "FAILED 15000ms"
+			return 1
+		fi
+
+		http_code=$(echo "$result" | awk '{print $1}')
+		local time_s2=$(echo "$result" | awk '{print $2}')
+		time_ms=$(awk -v t="$time_s2" 'BEGIN{printf "%.0f", t*1000}')
+
+		if [ -n "$http_code" ] && [ "$http_code" != "000" ]; then
+			log_info "OK ${http_code} ${time_ms}ms"
 		else
-			log_err "FAILED — Could not reach $target (${elapsed}s)"
-			log_err "Check: aether-ctl status"
+			log_err "FAILED ${time_ms}ms"
+			return 1
 		fi
 	fi
 }

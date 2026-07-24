@@ -114,28 +114,34 @@ function doTestConnection(host) {
 			resultEl.style.color = '#888';
 		}
 
-		var startTime = Date.now();
 		callFileExec('/usr/bin/aether-ctl', [ 'test', host ]
 		).then(function(r) {
-			var elapsed = Date.now() - startTime;
 			var output = (r && r.stdout) ? r.stdout : '';
-			if (output.indexOf('OK') !== -1) {
-				var match = output.match(/HTTP (\d+),\s*([\d.]+)s/);
-				var info = match ? 'HTTP ' + match[1] + ' — ' + Math.round(parseFloat(match[2]) * 1000) + 'ms' : 'OK — ' + elapsed + 'ms';
+			var errput = (r && r.stderr) ? r.stderr : '';
+			var combined = output + ' ' + errput;
+			// New format: "OK <http_code> <ms>ms" or "FAILED <ms>ms"
+			var okMatch = combined.match(/OK\s+(\d+)\s+(\d+)ms/i);
+			var failMatch = combined.match(/FAILED\s+(\d+)ms/i);
+			if (okMatch) {
+				var info = 'HTTP ' + okMatch[1] + ' \u2014 ' + okMatch[2] + 'ms';
 				if (resultEl) {
 					resultEl.textContent = info;
 					resultEl.style.color = '#2ecc71';
 				}
+			} else if (failMatch) {
+				if (resultEl) {
+					resultEl.textContent = 'Failed \u2014 ' + failMatch[1] + 'ms';
+					resultEl.style.color = '#e74c3c';
+				}
 			} else {
 				if (resultEl) {
-					resultEl.textContent = 'Failed — ' + elapsed + 'ms';
+					resultEl.textContent = 'Failed';
 					resultEl.style.color = '#e74c3c';
 				}
 			}
 		}).catch(function() {
-			var elapsed = Date.now() - startTime;
 			if (resultEl) {
-				resultEl.textContent = 'Timeout — ' + elapsed + 'ms';
+				resultEl.textContent = 'Error';
 				resultEl.style.color = '#e74c3c';
 			}
 		}).finally(function() {
@@ -145,13 +151,6 @@ function doTestConnection(host) {
 	};
 }
 
-function fetchLogs() {
-	return callFileExec('logread', [ '-e', 'aether', '-l', '40' ]).then(function(r) {
-		return (r && r.stdout) ? r.stdout : '(no logs)';
-	}).catch(function() {
-		return '(failed to read logs)';
-	});
-}
 
 return view.extend({
 	load: function() {
@@ -271,37 +270,144 @@ return view.extend({
 			var logSection = E('div', { 'class': 'cbi-section' }, [
 				E('h3', { 'style': 'margin-top:0' }, 'Live Logs'),
 				E('p', { 'style': 'margin:4px 0 10px 0;color:#666;font-size:13px' },
-					'Recent Aether log output. Click Refresh to update.')
+					'Auto-updating Aether log output. Streaming in real-time.')
 			]);
 
 			var logContent = E('pre', {
+				'id': 'aether-log-content',
 				'style': 'background:#1a1a2e;color:#e0e0e0;padding:12px;border-radius:6px;max-height:400px;overflow-y:auto;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-all;margin:0'
 			}, st.logs || '(no logs)');
 
-			var refreshBtn = E('input', {
+			// Auto-scroll toggle
+			var autoScroll = true;
+			var autoScrollLabel = E('label', {
+				'style': 'font-size:13px;color:#666;display:flex;align-items:center;gap:6px;cursor:pointer'
+			});
+			var autoScrollCheckbox = E('input', {
+				'type': 'checkbox',
+				'checked': true,
+				'style': 'margin:0',
+				'click': function() { autoScroll = autoScrollCheckbox.checked; }
+			});
+			autoScrollLabel.appendChild(autoScrollCheckbox);
+			autoScrollLabel.appendChild(document.createTextNode('Auto-scroll'));
+
+			// Pause/resume button
+			var isPaused = false;
+			var pauseBtn = E('input', {
 				'type': 'button',
-				'class': 'cbi-button cbi-button-apply',
-				'value': 'Refresh',
+				'class': 'cbi-button cbi-button-reset',
+				'value': 'Pause',
 				'click': function() {
-					refreshBtn.disabled = true;
-					refreshBtn.value = 'Loading...';
-					fetchLogs().then(function(logs) {
-						logContent.textContent = logs;
-						logContent.scrollTop = logContent.scrollHeight;
-					}).finally(function() {
-						refreshBtn.disabled = false;
-						refreshBtn.value = 'Refresh';
-					});
+					isPaused = !isPaused;
+					pauseBtn.value = isPaused ? 'Resume' : 'Pause';
+					pauseBtn.className = isPaused ? 'cbi-button cbi-button-apply' : 'cbi-button cbi-button-reset';
+					if (!isPaused) {
+						fetchLatestLogs();
+					}
 				}
 			});
 
-			var logHeader = E('div', {
-				'style': 'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px'
-			}, [ refreshBtn ]);
+			// Clear button
+			var clearBtn = E('input', {
+				'type': 'button',
+				'class': 'cbi-button',
+				'value': 'Clear',
+				'click': function() {
+					logContent.textContent = '';
+				}
+			});
 
-			logSection.appendChild(logHeader);
+			var logControls = E('div', {
+				'style': 'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px'
+			}, [ autoScrollLabel, E('div', { 'style': 'display:flex;gap:6px' }, [ pauseBtn, clearBtn ]) ]);
+
+			logSection.appendChild(logControls);
 			logSection.appendChild(logContent);
 			el.appendChild(logSection);
+
+			// --- Real live log streaming ---
+			var logPollTimer = null;
+
+			function fetchLatestLogs() {
+				if (isPaused) return;
+				callFileExec('logread', [ '-e', 'aether', '-l', '50' ]).then(function(r) {
+					var logs = (r && r.stdout) ? r.stdout : '';
+					if (!logs) return;
+
+					var currentText = logContent.textContent || '';
+					if (currentText === '(no logs)' || currentText === '') {
+						logContent.textContent = logs;
+						return;
+					}
+
+					/* Find lines that appeared AFTER the last line we already have.
+					   Take the last non-empty line of the current buffer and
+					   look for it in the new logread output.  Everything after
+					   that position is new.  If the last line is NOT found (log
+					   rotated or buffer exceeded), replace the entire buffer. */
+					var currentLines = currentText.split('\n');
+					var lastLine = '';
+					for (var i = currentLines.length - 1; i >= 0; i--) {
+						if (currentLines[i].trim() !== '') {
+							lastLine = currentLines[i];
+							break;
+						}
+					}
+
+					if (!lastLine) {
+						logContent.textContent = logs;
+						return;
+					}
+
+					var newLines = logs.split('\n');
+					var matchPos = -1;
+					for (var j = 0; j < newLines.length; j++) {
+						if (newLines[j] === lastLine) {
+							matchPos = j;
+						}
+					}
+
+					if (matchPos >= 0 && matchPos < newLines.length - 1) {
+						/* append everything after the matched line */
+						var tail = newLines.slice(matchPos + 1).join('\n');
+						if (tail.trim() !== '') {
+							if (logContent.textContent.slice(-1) !== '\n') {
+								logContent.textContent += '\n';
+							}
+							logContent.textContent += tail;
+							if (tail.slice(-1) !== '\n') {
+								logContent.textContent += '\n';
+							}
+						}
+					} else if (matchPos >= 0) {
+						/* last line matches and nothing after it — no new logs */
+						return;
+					} else {
+						/* last line not found — log rotated or buffer exceeded,
+						   replace entire content with fresh window */
+						logContent.textContent = logs;
+					}
+
+					/* Trim to last 500 lines */
+					var allLines = logContent.textContent.split('\n');
+					if (allLines.length > 500) {
+						logContent.textContent = allLines.slice(-500).join('\n');
+					}
+
+					if (autoScroll) {
+						logContent.scrollTop = logContent.scrollHeight;
+					}
+				}).catch(function() {});
+			}
+
+			// Poll every 2 seconds for new logs
+			logPollTimer = setInterval(fetchLatestLogs, 2000);
+
+			// Clean up timer when leaving the page
+			window.addEventListener('beforeunload', function() {
+				if (logPollTimer) clearInterval(logPollTimer);
+			});
 
 			el.appendChild(E('hr', {
 				'style': 'margin:12px 0;border:none;border-top:1px solid #ddd'

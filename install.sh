@@ -14,7 +14,7 @@
 #   --force-config   Overwrite existing /etc/config/aether
 #   --no-curl        Skip curl installation
 
-set -e
+# No set -e — we handle errors explicitly with || blocks and error() calls.
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -109,6 +109,10 @@ if [ -z "$ASSET_URL" ]; then
     exit 1
 fi
 
+# --- Find SHA256 checksum URL ---
+SHA256_FILE="${ARCHIVE}.sha256"
+SHA256_URL=$(echo "$RELEASE_JSON" | grep -o "\"browser_download_url\": *\"[^\"]*${SHA256_FILE}\"" | sed -E 's/.*"(https[^"]+)"/\1/' | head -n1)
+
 # --- Download ---
 TMP_DIR=$(mktemp -d /tmp/aether-install.XXXXXX)
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -118,6 +122,29 @@ wget -q -O "$TMP_DIR/$ARCHIVE" "$ASSET_URL" || {
     error "Download failed."
     exit 1
 }
+
+# --- Verify checksum ---
+if [ -n "$SHA256_URL" ]; then
+    info "Verifying checksum..."
+    wget -q -O "$TMP_DIR/$SHA256_FILE" "$SHA256_URL" || {
+        warn "Could not download checksum file. Skipping verification."
+    }
+    if [ -f "$TMP_DIR/$SHA256_FILE" ]; then
+        EXPECTED_HASH=$(cat "$TMP_DIR/$SHA256_FILE" | awk '{print $1}' | tr -d '[:space:]')
+        ACTUAL_HASH=$(sha256sum "$TMP_DIR/$ARCHIVE" | awk '{print $1}')
+        if [ "$EXPECTED_HASH" = "$ACTUAL_HASH" ]; then
+            success "Checksum verified"
+        else
+            error "Checksum mismatch!"
+            error "Expected: $EXPECTED_HASH"
+            error "Actual:   $ACTUAL_HASH"
+            error "The download may be corrupted or tampered with. Aborting."
+            exit 1
+        fi
+    fi
+else
+    warn "No checksum file found for $ARCHIVE. Skipping verification."
+fi
 
 # --- Extract ---
 info "Extracting..."
@@ -189,23 +216,30 @@ fetch_file() {
 }
 
 # --- Install config ---
+FILE_ERRORS=0
 if [ -f /etc/config/aether ] && [ "$FORCE_CONFIG" -eq 0 ]; then
     warn "Keeping existing /etc/config/aether"
 else
-    fetch_file "etc/config/aether" /etc/config/aether 644
+    fetch_file "etc/config/aether" /etc/config/aether 644 || FILE_ERRORS=$((FILE_ERRORS + 1))
 fi
 
 # --- Install files ---
-fetch_file "etc/init.d/aether" /etc/init.d/aether 755
-fetch_file "usr/bin/aether-ctl" /usr/bin/aether-ctl 755
-fetch_file "usr/libexec/rpcd/luci-app-aether" /usr/libexec/rpcd/luci-app-aether 755
-fetch_file "usr/share/rpcd/acl.d/luci-app-aether.json" /usr/share/rpcd/acl.d/luci-app-aether.json 644
-fetch_file "usr/share/luci/menu.d/luci-app-aether.json" /usr/share/luci/menu.d/luci-app-aether.json 644
-fetch_file "www/luci-static/resources/view/aether.js" /www/luci-static/resources/view/aether.js 644
+fetch_file "etc/init.d/aether" /etc/init.d/aether 755 || FILE_ERRORS=$((FILE_ERRORS + 1))
+fetch_file "usr/bin/aether-ctl" /usr/bin/aether-ctl 755 || FILE_ERRORS=$((FILE_ERRORS + 1))
+fetch_file "usr/libexec/rpcd/luci-app-aether" /usr/libexec/rpcd/luci-app-aether 755 || FILE_ERRORS=$((FILE_ERRORS + 1))
+fetch_file "usr/share/rpcd/acl.d/luci-app-aether.json" /usr/share/rpcd/acl.d/luci-app-aether.json 644 || FILE_ERRORS=$((FILE_ERRORS + 1))
+fetch_file "usr/share/luci/menu.d/luci-app-aether.json" /usr/share/luci/menu.d/luci-app-aether.json 644 || FILE_ERRORS=$((FILE_ERRORS + 1))
+fetch_file "www/luci-static/resources/view/aether.js" /www/luci-static/resources/view/aether.js 644 || FILE_ERRORS=$((FILE_ERRORS + 1))
+
+# --- Check for file errors ---
+if [ "$FILE_ERRORS" -gt 0 ]; then
+    warn "$FILE_ERRORS file(s) failed to install. Check network connection and re-run."
+fi
 
 # --- Identity storage ---
 mkdir -p /etc/aether 2>/dev/null
 chmod 700 /etc/aether 2>/dev/null || true
+[ -f /etc/aether/aether.toml ] || touch /etc/aether/aether.toml
 
 # --- Register service ---
 /etc/init.d/aether enable 2>/dev/null || true

@@ -33,11 +33,25 @@ start_service() {
 	config_get validate_secs main validate_secs '10'
 	config_get quick_reconnect main quick_reconnect '0'
 	config_get no_data_check main no_data_check '0'
-	config_get config_path main config_path '/etc/aether'
+	config_get config_path main config_path '/etc/aether/aether.toml'
 	config_get log_level main log_level 'info'
 
+	# Validate no spaces in values that become command arguments
+	local bad_val=""
+	case "$socks_listen" in  *" "*) bad_val="$bad_val socks_listen" ;; esac
+	case "$config_path" in  *" "*) bad_val="$bad_val config_path" ;; esac
+	case "$peer" in         *" "*) bad_val="$bad_val peer" ;; esac
+	case "$h2_peer" in      *" "*) bad_val="$bad_val h2_peer" ;; esac
+	case "$fragment_size" in *" "*) bad_val="$bad_val fragment_size" ;; esac
+	case "$fragment_delay" in *" "*) bad_val="$bad_val fragment_delay" ;; esac
+	if [ -n "$bad_val" ]; then
+	    logger -t aether "ERROR: spaces in config values:$bad_val — refusing to start"
+	    echo "aether: ERROR: spaces in config values:$bad_val" >&2
+	    return 1
+	fi
+
 	local cmd_args=""
-	cmd_args="$cmd_args --bind $socks_listen"
+	cmd_args="$cmd_args --bind $socks_listen" 
 	cmd_args="$cmd_args --config $config_path"
 
 	case "$protocol" in
@@ -75,6 +89,7 @@ start_service() {
 	mkdir -p "$(dirname "$config_path")" 2>/dev/null
 
 	logger -t aether "Starting Aether (protocol=$protocol, obfuscation=$obfuscation_profile)"
+	logger -t aether "Command: $PROG $cmd_args"
 
 	procd_open_instance
 	procd_set_param command $PROG $cmd_args
