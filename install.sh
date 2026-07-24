@@ -89,7 +89,7 @@ done
 
 # --- Fetch latest release info ---
 info "Fetching latest release from GitHub..."
-RELEASE_JSON=$(wget -qO- -H "Accept: application/vnd.github+json" "$API_URL" 2>/dev/null) || {
+RELEASE_JSON=$(wget -qO- "$API_URL" 2>/dev/null) || {
     error "Failed to reach GitHub API. Check internet connection."
     exit 1
 }
