@@ -114,7 +114,7 @@ TMP_DIR=$(mktemp -d /tmp/aether-install.XXXXXX)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 info "Downloading $ARCHIVE..."
-wget -q --show-progress -O "$TMP_DIR/$ARCHIVE" "$ASSET_URL" || {
+wget -q -O "$TMP_DIR/$ARCHIVE" "$ASSET_URL" || {
     error "Download failed."
     exit 1
 }
