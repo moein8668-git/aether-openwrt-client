@@ -82,14 +82,14 @@ echo " Arch: $ARCH -> $ARCHIVE"
 echo "========================================="
 echo ""
 
-# --- Check dependencies ---
-for cmd in curl tar grep sed; do
-    command -v "$cmd" >/dev/null 2>&1 || { error "Missing: $cmd (install with: apk add $cmd)"; exit 1; }
+# --- Check dependencies (wget is built-in on OpenWrt) ---
+for cmd in wget tar grep sed; do
+    command -v "$cmd" >/dev/null 2>&1 || { error "Missing: $cmd"; exit 1; }
 done
 
 # --- Fetch latest release info ---
 info "Fetching latest release from GitHub..."
-RELEASE_JSON=$(curl -fsSL -H "Accept: application/vnd.github+json" "$API_URL" 2>/dev/null) || {
+RELEASE_JSON=$(wget -qO- -H "Accept: application/vnd.github+json" "$API_URL" 2>/dev/null) || {
     error "Failed to reach GitHub API. Check internet connection."
     exit 1
 }
@@ -114,10 +114,10 @@ TMP_DIR=$(mktemp -d /tmp/aether-install.XXXXXX)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 info "Downloading $ARCHIVE..."
-if ! curl -fL --progress-bar -o "$TMP_DIR/$ARCHIVE" "$ASSET_URL"; then
+wget -q --show-progress -O "$TMP_DIR/$ARCHIVE" "$ASSET_URL" || {
     error "Download failed."
     exit 1
-fi
+}
 
 # --- Extract ---
 info "Extracting..."
