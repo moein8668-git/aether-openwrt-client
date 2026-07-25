@@ -614,7 +614,7 @@ return view.extend({
 					sort: keys,
 					widget: this.widget,
 					optional: this.optional,
-					validate: this.getValidator(section_id),
+					validate: (typeof this.getValidator === 'function') ? this.getValidator(section_id) : null,
 					disabled: (this.readonly != null) ? this.readonly : this.map.readonly
 				}).render();
 			};
