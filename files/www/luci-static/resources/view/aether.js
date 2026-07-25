@@ -85,6 +85,47 @@ function aetherSyncProfileChoices(profileOpt, section_id, protocol) {
 	}
 }
 
+function aetherSetOptionDisabled(opt, section_id, disabled) {
+	var uiEl = null, node = null, controls = [];
+
+	try {
+		uiEl = opt.getUIElement(section_id);
+	}
+	catch (e) {
+		uiEl = null;
+	}
+
+	node = uiEl ? (uiEl.node || uiEl) : document.getElementById(opt.cbid(section_id));
+	if (!node)
+		return;
+
+	if (node.matches && node.matches('input, select, textarea, button, .cbi-dropdown'))
+		controls.push(node);
+
+	if (node.querySelectorAll) {
+		node.querySelectorAll('input, select, textarea, button, .cbi-dropdown').forEach(function(ctrl) {
+			controls.push(ctrl);
+		});
+	}
+
+	controls.forEach(function(ctrl) {
+		if (disabled)
+			ctrl.setAttribute('disabled', 'disabled');
+		else
+			ctrl.removeAttribute('disabled');
+
+		if ('disabled' in ctrl)
+			ctrl.disabled = disabled;
+	});
+}
+
+function aetherSyncMasqueOptions(options, section_id, protocol) {
+	var disabled = (protocol !== 'masque');
+	options.forEach(function(opt) {
+		aetherSetOptionDisabled(opt, section_id, disabled);
+	});
+}
+
 var callServiceList = rpc.declare({
 	object: 'service',
 	method: 'list',
@@ -505,8 +546,37 @@ return view.extend({
 			o.value('gool', 'WARP-in-WARP');
 			o.default = 'masque';
 			var protocolOpt = o;
+			var masqueOptionOpts = [];
 
-			o = s.option(form.ListValue, 'obfuscation_profile', 'Obfuscation Profile',
+			o = s.option(form.Value, 'socks_listen', 'SOCKS5 Listen Address');
+			o.default = '0.0.0.0:1819';
+			o.datatype = 'ipaddrport';
+			o.rmempty = false;
+
+			s = m.section(form.NamedSection, 'main', 'aether', 'Network');
+
+			o = s.option(form.ListValue, 'scan_mode', 'Scan Mode',
+				'turbo=fastest, balanced=default, thorough=best quality, stealth=quietest, ironclad=real tunnel test');
+			o.value('turbo', 'Turbo');
+			o.value('balanced', 'Balanced (default)');
+			o.value('thorough', 'Thorough');
+			o.value('stealth', 'Stealth');
+			o.value('ironclad', 'Ironclad (real tunnel test)');
+			o.default = 'balanced';
+
+			o = s.option(form.ListValue, 'ip_version', 'IP Version');
+			o.value('ipv4', 'IPv4 only');
+			o.value('ipv6', 'IPv6 only');
+			o.value('both', 'Both');
+			o.default = 'ipv4';
+
+			o = s.option(form.Value, 'peer', 'Force Peer',
+				'ip:port, or leave empty for auto-scan');
+			o.rmempty = true;
+
+			s = m.section(form.NamedSection, 'main', 'aether', 'Obfuscation');
+
+			o = s.option(form.ListValue, 'obfuscation_profile', 'Profile',
 				'Choices change with Protocol (MASQUE vs WireGuard/gool)');
 			o.rmempty = false;
 			o.value('firewall', 'Firewall (recommended)');
@@ -550,59 +620,35 @@ return view.extend({
 			};
 
 			protocolOpt.onchange = function(ev, section_id, value) {
-				aetherSyncProfileChoices(profileOpt, section_id, value || 'masque');
+				var proto = value || 'masque';
+				aetherSyncProfileChoices(profileOpt, section_id, proto);
+				aetherSyncMasqueOptions(masqueOptionOpts, section_id, proto);
 			};
-
-			o = s.option(form.Value, 'socks_listen', 'SOCKS5 Listen Address');
-			o.default = '0.0.0.0:1819';
-			o.datatype = 'ipaddrport';
-			o.rmempty = false;
-
-			s = m.section(form.NamedSection, 'main', 'aether', 'Network');
-
-			o = s.option(form.ListValue, 'scan_mode', 'Scan Mode',
-				'turbo=fastest, balanced=default, thorough=best quality, stealth=quietest, ironclad=real tunnel test');
-			o.value('turbo', 'Turbo');
-			o.value('balanced', 'Balanced (default)');
-			o.value('thorough', 'Thorough');
-			o.value('stealth', 'Stealth');
-			o.value('ironclad', 'Ironclad (real tunnel test)');
-			o.default = 'balanced';
-
-			o = s.option(form.ListValue, 'ip_version', 'IP Version');
-			o.value('ipv4', 'IPv4 only');
-			o.value('ipv6', 'IPv6 only');
-			o.value('both', 'Both');
-			o.default = 'ipv4';
-
-			o = s.option(form.Value, 'peer', 'Force Peer',
-				'ip:port, or leave empty for auto-scan');
-			o.rmempty = true;
 
 			s = m.section(form.NamedSection, 'main', 'aether', 'MASQUE Options');
 
 			o = s.option(form.Flag, 'http2_mode', 'HTTP/2 Mode',
 				'Enable if UDP/QUIC is blocked');
 			o.default = '0';
-			o.depends('protocol', 'masque');
+			masqueOptionOpts.push(o);
 
 			o = s.option(form.Value, 'h2_peer', 'H2 Peer',
 				'Manual destination for h2 mode (ip:port), leave empty for auto');
 			o.rmempty = true;
-			o.depends('http2_mode', '1');
+			masqueOptionOpts.push(o);
 
 			o = s.option(form.Flag, 'fragment_tls', 'TLS Fragmentation',
 				'Fragment ClientHello (HTTP/2 only)');
 			o.default = '0';
-			o.depends('http2_mode', '1');
+			masqueOptionOpts.push(o);
 
 			o = s.option(form.Value, 'fragment_size', 'Fragment Size');
 			o.default = '16-32';
-			o.depends('fragment_tls', '1');
+			masqueOptionOpts.push(o);
 
 			o = s.option(form.Value, 'fragment_delay', 'Fragment Delay (ms)');
 			o.default = '2-10';
-			o.depends('fragment_tls', '1');
+			masqueOptionOpts.push(o);
 
 			s = m.section(form.NamedSection, 'main', 'aether', 'Advanced');
 
@@ -651,6 +697,7 @@ return view.extend({
 					proto = uci.get('aether', 'main', 'protocol') || 'masque';
 				}
 				aetherSyncProfileChoices(profileOpt, 'main', proto);
+				aetherSyncMasqueOptions(masqueOptionOpts, 'main', proto);
 				return el;
 			});
 		});
