@@ -6,7 +6,7 @@ OpenWrt integration for [Aether](https://github.com/CluvexStudio/Aether) — a c
 
 ## Requirements
 
-- **OpenWrt 25.12 or newer** (uses apk package manager, musl libc)
+- **OpenWrt 24.10 or newer** (musl libc; uses apk on 25.12+, opkg on 24.10 and older)
 - Tested on OpenWrt 25.12.5 (x86_64)
 - ~10 MB free disk space
 - Architectures: x86_64, arm64 (aarch64), armv7
@@ -112,7 +112,7 @@ wget -qO /tmp/aether-install.sh https://raw.githubusercontent.com/moein8668-git/
 
 ## Notes
 
-- Requires OpenWrt 25.12+ with musl libc and apk package manager
+- Requires OpenWrt 24.10+ with musl libc (apk on 25.12+, opkg on older)
 - `curl` is optional (asked during install, defaults to No). Only needed for LuCI connection test buttons.
 - This project is not affiliated with CluvexStudio
 

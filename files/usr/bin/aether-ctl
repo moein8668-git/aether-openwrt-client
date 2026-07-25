@@ -159,7 +159,13 @@ do_test() {
 
 	# Check curl is installed
 	if ! command -v curl >/dev/null 2>&1; then
-		log_err "curl not found. Install with: apk add curl"
+		if command -v apk >/dev/null 2>&1; then
+			log_err "curl not found. Install with: apk add curl"
+		elif command -v opkg >/dev/null 2>&1; then
+			log_err "curl not found. Install with: opkg install curl"
+		else
+			log_err "curl not found. Install curl using your package manager."
+		fi
 		return 1
 	fi
 
