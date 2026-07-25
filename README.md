@@ -74,6 +74,8 @@ aether-ctl version
 
 After install, open your router web UI -> **Services -> Aether**
 
+![LuCI Web Interface](screenshots/luci.png)
+
 Features:
 - Status table (state, version, endpoint, transport)
 - Start / Stop / Restart buttons
