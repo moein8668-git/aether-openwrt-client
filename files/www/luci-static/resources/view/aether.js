@@ -431,6 +431,46 @@ return view.extend({
 			o.value('gool', 'WARP-in-WARP');
 			o.default = 'masque';
 
+			/* Separate option names required — LuCI merges .value() calls when the
+			   option name is reused. Both write the same UCI key via ucioption.
+			   Kept in this section so depends('protocol') resolves correctly. */
+
+			/* MASQUE: firewall (default), gfw, off */
+			o = s.option(form.ListValue, 'obfuscation_masque', 'Obfuscation Profile',
+				'firewall = recommended; gfw = heavier; off = open networks only');
+			o.ucioption = 'obfuscation_profile';
+			o.value('firewall', 'Firewall (recommended)');
+			o.value('gfw', 'GFW');
+			o.value('off', 'Off');
+			o.default = 'firewall';
+			o.rmempty = false;
+			o.depends('protocol', 'masque');
+			o.cfgvalue = function(section_id) {
+				var v = uci.get('aether', section_id, 'obfuscation_profile');
+				if (v !== 'firewall' && v !== 'gfw' && v !== 'off')
+					return 'firewall';
+				return v;
+			};
+
+			/* WireGuard / gool: balanced (default), aggressive, light, off */
+			o = s.option(form.ListValue, 'obfuscation_wg', 'Obfuscation Profile',
+				'balanced = recommended; aggressive = heaviest; light = minimal; off = none');
+			o.ucioption = 'obfuscation_profile';
+			o.value('balanced', 'Balanced (recommended)');
+			o.value('aggressive', 'Aggressive');
+			o.value('light', 'Light');
+			o.value('off', 'Off');
+			o.default = 'balanced';
+			o.rmempty = false;
+			o.depends('protocol', 'wg');
+			o.depends('protocol', 'gool');
+			o.cfgvalue = function(section_id) {
+				var v = uci.get('aether', section_id, 'obfuscation_profile');
+				if (v !== 'balanced' && v !== 'aggressive' && v !== 'light' && v !== 'off')
+					return 'balanced';
+				return v;
+			};
+
 			o = s.option(form.Value, 'socks_listen', 'SOCKS5 Listen Address');
 			o.default = '0.0.0.0:1819';
 			o.datatype = 'ipaddrport';
@@ -457,41 +497,7 @@ return view.extend({
 				'ip:port, or leave empty for auto-scan');
 			o.rmempty = true;
 
-			s = m.section(form.NamedSection, 'main', 'aether', 'Obfuscation');
-
-			/* MASQUE profiles: firewall (default), gfw, off */
-			o = s.option(form.ListValue, 'obfuscation_profile', 'Profile',
-				'firewall = recommended; gfw = heavier; off = open networks only');
-			o.value('firewall', 'Firewall (recommended)');
-			o.value('gfw', 'GFW');
-			o.value('off', 'Off');
-			o.default = 'firewall';
-			o.rmempty = false;
-			o.depends('protocol', 'masque');
-			o.cfgvalue = function(section_id) {
-				var v = form.Value.prototype.cfgvalue.apply(this, [section_id]);
-				if (v !== 'firewall' && v !== 'gfw' && v !== 'off')
-					return 'firewall';
-				return v;
-			};
-
-			/* WireGuard / gool profiles: balanced (default), aggressive, light, off */
-			o = s.option(form.ListValue, 'obfuscation_profile', 'Profile',
-				'balanced = recommended; aggressive = heaviest; light = minimal; off = none');
-			o.value('balanced', 'Balanced (recommended)');
-			o.value('aggressive', 'Aggressive');
-			o.value('light', 'Light');
-			o.value('off', 'Off');
-			o.default = 'balanced';
-			o.rmempty = false;
-			o.depends('protocol', 'wg');
-			o.depends('protocol', 'gool');
-			o.cfgvalue = function(section_id) {
-				var v = form.Value.prototype.cfgvalue.apply(this, [section_id]);
-				if (v !== 'balanced' && v !== 'aggressive' && v !== 'light' && v !== 'off')
-					return 'balanced';
-				return v;
-			};
+			s = m.section(form.NamedSection, 'main', 'aether', 'MASQUE Options');
 
 			o = s.option(form.Flag, 'http2_mode', 'HTTP/2 Mode',
 				'Enable if UDP/QUIC is blocked');
