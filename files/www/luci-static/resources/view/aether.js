@@ -459,14 +459,39 @@ return view.extend({
 
 			s = m.section(form.NamedSection, 'main', 'aether', 'Obfuscation');
 
-			o = s.option(form.ListValue, 'obfuscation_profile', 'Profile');
-			o.value('off', 'Off');
-			o.value('light', 'Light');
+			/* MASQUE profiles: firewall (default), gfw, off */
+			o = s.option(form.ListValue, 'obfuscation_profile', 'Profile',
+				'firewall = recommended; gfw = heavier; off = open networks only');
 			o.value('firewall', 'Firewall (recommended)');
-			o.value('balanced', 'Balanced');
 			o.value('gfw', 'GFW');
-			o.value('aggressive', 'Aggressive');
+			o.value('off', 'Off');
 			o.default = 'firewall';
+			o.rmempty = false;
+			o.depends('protocol', 'masque');
+			o.cfgvalue = function(section_id) {
+				var v = form.Value.prototype.cfgvalue.apply(this, [section_id]);
+				if (v !== 'firewall' && v !== 'gfw' && v !== 'off')
+					return 'firewall';
+				return v;
+			};
+
+			/* WireGuard / gool profiles: balanced (default), aggressive, light, off */
+			o = s.option(form.ListValue, 'obfuscation_profile', 'Profile',
+				'balanced = recommended; aggressive = heaviest; light = minimal; off = none');
+			o.value('balanced', 'Balanced (recommended)');
+			o.value('aggressive', 'Aggressive');
+			o.value('light', 'Light');
+			o.value('off', 'Off');
+			o.default = 'balanced';
+			o.rmempty = false;
+			o.depends('protocol', 'wg');
+			o.depends('protocol', 'gool');
+			o.cfgvalue = function(section_id) {
+				var v = form.Value.prototype.cfgvalue.apply(this, [section_id]);
+				if (v !== 'balanced' && v !== 'aggressive' && v !== 'light' && v !== 'off')
+					return 'balanced';
+				return v;
+			};
 
 			o = s.option(form.Flag, 'http2_mode', 'HTTP/2 Mode',
 				'Enable if UDP/QUIC is blocked');

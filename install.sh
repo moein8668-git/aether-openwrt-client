@@ -210,9 +210,19 @@ if [ "$FILE_ERRORS" -gt 0 ]; then
 fi
 
 # --- Identity storage ---
+# Only create the directory. Do NOT touch an empty aether.toml — Aether
+# provisions a real identity when the file is missing, but an empty file
+# fails TOML parse (missing device_id) and crashes wg/gool. MASQUE uses a
+# sibling path (aether-masque.toml) so it was unaffected by this bug.
 mkdir -p /etc/aether 2>/dev/null
 chmod 700 /etc/aether 2>/dev/null || true
-[ -f /etc/aether/aether.toml ] || touch /etc/aether/aether.toml
+# Migrate: remove empty/invalid stubs left by older installers
+for f in /etc/aether/aether.toml /etc/aether/aether-secondary.toml; do
+    if [ -f "$f" ] && ! grep -q 'device_id' "$f" 2>/dev/null; then
+        warn "Removing invalid identity stub: $f"
+        rm -f "$f"
+    fi
+done
 
 # --- Register service ---
 /etc/init.d/aether enable 2>/dev/null || true

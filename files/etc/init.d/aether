@@ -9,6 +9,30 @@ STOP=10
 USE_PROCD=1
 PROG=/usr/bin/aether
 
+# Aether identity files: missing = provision new; empty/invalid = fatal TOML error.
+# MASQUE uses a sibling path (aether-masque.toml); wg/gool use the base path and
+# gool also needs aether-secondary.toml. Older installers created empty stubs.
+sanitize_identity_file() {
+	local f="$1"
+	[ -f "$f" ] || return 0
+	if ! grep -q 'device_id' "$f" 2>/dev/null; then
+		logger -t aether "Removing invalid identity stub (missing device_id): $f"
+		rm -f "$f"
+	fi
+}
+
+# Mirror Aether's derive_sibling_path: insert -<suffix> before the extension.
+identity_sibling() {
+	local base="$1" suffix="$2"
+	local dir name
+	dir="${base%/*}"
+	name="${base##*/}"
+	case "$name" in
+		*.*) echo "${dir}/${name%.*}-${suffix}.${name##*.}" ;;
+		*)   echo "${base}-${suffix}" ;;
+	esac
+}
+
 start_service() {
 	config_load aether
 
@@ -87,6 +111,10 @@ start_service() {
 	[ "$no_data_check" = "1" ] && cmd_args="$cmd_args --no-data-check"
 
 	mkdir -p "$(dirname "$config_path")" 2>/dev/null
+	# Drop empty stubs so wg/gool can provision; keep valid identity files.
+	sanitize_identity_file "$config_path"
+	sanitize_identity_file "$(identity_sibling "$config_path" secondary)"
+	sanitize_identity_file "$(identity_sibling "$config_path" masque)"
 
 	logger -t aether "Starting Aether (protocol=$protocol, obfuscation=$obfuscation_profile)"
 	logger -t aether "Command: $PROG $cmd_args"

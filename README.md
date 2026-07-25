@@ -1,3 +1,5 @@
+[فارسی](README-fa.md) | [English](README.md)
+
 # Aether OpenWrt Client
 
 OpenWrt integration for [Aether](https://github.com/CluvexStudio/Aether) — a censorship circumvention client.
