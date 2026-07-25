@@ -9,7 +9,81 @@
 'require form';
 'require rpc';
 'require uci';
+'require ui';
 'require view';
+
+/* Obfuscation profiles from Aether core guide — depend on protocol. */
+var AETHER_PROFILES = {
+	masque: {
+		firewall: 'Firewall (recommended)',
+		gfw: 'GFW',
+		off: 'Off'
+	},
+	wg: {
+		balanced: 'Balanced (recommended)',
+		aggressive: 'Aggressive',
+		light: 'Light',
+		off: 'Off'
+	},
+	gool: {
+		balanced: 'Balanced (recommended)',
+		aggressive: 'Aggressive',
+		light: 'Light',
+		off: 'Off'
+	}
+};
+
+function aetherProfileLabels(protocol) {
+	return AETHER_PROFILES[protocol] || AETHER_PROFILES.masque;
+}
+
+function aetherProfileDefault(protocol) {
+	return (protocol === 'wg' || protocol === 'gool') ? 'balanced' : 'firewall';
+}
+
+function aetherSyncProfileChoices(profileOpt, section_id, protocol) {
+	var labels = aetherProfileLabels(protocol);
+	var keys = Object.keys(labels);
+	var def = aetherProfileDefault(protocol);
+	var uiEl, cur;
+
+	profileOpt.keylist = keys.slice();
+	profileOpt.vallist = keys.map(function(k) { return labels[k]; });
+
+	try {
+		uiEl = profileOpt.getUIElement(section_id);
+	}
+	catch (e) {
+		uiEl = null;
+	}
+
+	if (!uiEl)
+		return;
+
+	cur = uiEl.getValue();
+	if (cur == null || cur === '' || !labels.hasOwnProperty(cur))
+		cur = def;
+
+	if (typeof uiEl.clearChoices === 'function' && typeof uiEl.addChoices === 'function') {
+		uiEl.clearChoices(true);
+		uiEl.addChoices(keys, labels);
+		uiEl.setValue(cur);
+		return;
+	}
+
+	/* Native <select> fallback */
+	var node = uiEl.node || uiEl;
+	var select = (node && node.tagName === 'SELECT') ? node
+		: (node && node.querySelector ? node.querySelector('select') : null);
+	if (select) {
+		while (select.firstChild)
+			select.removeChild(select.firstChild);
+		keys.forEach(function(k) {
+			select.appendChild(E('option', { value: k }, labels[k]));
+		});
+		select.value = cur;
+	}
+}
 
 var callServiceList = rpc.declare({
 	object: 'service',
@@ -430,45 +504,53 @@ return view.extend({
 			o.value('wg', 'WireGuard');
 			o.value('gool', 'WARP-in-WARP');
 			o.default = 'masque';
+			var protocolOpt = o;
 
-			/* Separate option names required — LuCI merges .value() calls when the
-			   option name is reused. Both write the same UCI key via ucioption.
-			   Kept in this section so depends('protocol') resolves correctly. */
-
-			/* MASQUE: firewall (default), gfw, off */
-			o = s.option(form.ListValue, 'obfuscation_masque', 'Obfuscation Profile',
-				'firewall = recommended; gfw = heavier; off = open networks only');
-			o.ucioption = 'obfuscation_profile';
+			o = s.option(form.ListValue, 'obfuscation_profile', 'Obfuscation Profile',
+				'Choices change with Protocol (MASQUE vs WireGuard/gool)');
+			o.rmempty = false;
 			o.value('firewall', 'Firewall (recommended)');
 			o.value('gfw', 'GFW');
 			o.value('off', 'Off');
-			o.default = 'firewall';
-			o.rmempty = false;
-			o.depends('protocol', 'masque');
-			o.cfgvalue = function(section_id) {
-				var v = uci.get('aether', section_id, 'obfuscation_profile');
-				if (v !== 'firewall' && v !== 'gfw' && v !== 'off')
-					return 'firewall';
-				return v;
-			};
-
-			/* WireGuard / gool: balanced (default), aggressive, light, off */
-			o = s.option(form.ListValue, 'obfuscation_wg', 'Obfuscation Profile',
-				'balanced = recommended; aggressive = heaviest; light = minimal; off = none');
-			o.ucioption = 'obfuscation_profile';
 			o.value('balanced', 'Balanced (recommended)');
 			o.value('aggressive', 'Aggressive');
 			o.value('light', 'Light');
-			o.value('off', 'Off');
-			o.default = 'balanced';
-			o.rmempty = false;
-			o.depends('protocol', 'wg');
-			o.depends('protocol', 'gool');
+			o.default = 'firewall';
+			var profileOpt = o;
 			o.cfgvalue = function(section_id) {
+				var proto = uci.get('aether', section_id, 'protocol') || 'masque';
 				var v = uci.get('aether', section_id, 'obfuscation_profile');
-				if (v !== 'balanced' && v !== 'aggressive' && v !== 'light' && v !== 'off')
-					return 'balanced';
+				var labels = aetherProfileLabels(proto);
+				if (!v || !labels.hasOwnProperty(v))
+					return aetherProfileDefault(proto);
 				return v;
+			};
+			o.renderWidget = function(section_id, option_index, cfgvalue) {
+				var proto = 'masque';
+				try {
+					proto = protocolOpt.formvalue(section_id) || protocolOpt.cfgvalue(section_id) || 'masque';
+				}
+				catch (e) {
+					proto = uci.get('aether', section_id, 'protocol') || 'masque';
+				}
+				var labels = aetherProfileLabels(proto);
+				var keys = Object.keys(labels);
+				this.keylist = keys.slice();
+				this.vallist = keys.map(function(k) { return labels[k]; });
+				if (cfgvalue == null || !labels.hasOwnProperty(cfgvalue))
+					cfgvalue = aetherProfileDefault(proto);
+				return new ui.Select(cfgvalue, labels, {
+					id: this.cbid(section_id),
+					sort: keys,
+					widget: this.widget,
+					optional: this.optional,
+					validate: this.getValidator(section_id),
+					disabled: (this.readonly != null) ? this.readonly : this.map.readonly
+				}).render();
+			};
+
+			protocolOpt.onchange = function(ev, section_id, value) {
+				aetherSyncProfileChoices(profileOpt, section_id, value || 'masque');
 			};
 
 			o = s.option(form.Value, 'socks_listen', 'SOCKS5 Listen Address');
@@ -561,6 +643,14 @@ return view.extend({
 
 			return m.render().then(function(formNode) {
 				el.appendChild(formNode);
+				var proto = 'masque';
+				try {
+					proto = protocolOpt.formvalue('main') || protocolOpt.cfgvalue('main') || 'masque';
+				}
+				catch (e) {
+					proto = uci.get('aether', 'main', 'protocol') || 'masque';
+				}
+				aetherSyncProfileChoices(profileOpt, 'main', proto);
 				return el;
 			});
 		});
