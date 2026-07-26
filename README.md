@@ -53,6 +53,11 @@ During install you will be asked:
 
 ## Uninstall
 
+**(one line)**
+```sh
+wget -qO /tmp/aether-uninstall.sh https://raw.githubusercontent.com/moein8668-git/aether-openwrt-client/main/uninstall.sh && chmod +x /tmp/aether-uninstall.sh && /tmp/aether-uninstall.sh
+```
+
 ```sh
 ./uninstall.sh           # remove files
 ./uninstall.sh --purge   # also remove config and identity data
