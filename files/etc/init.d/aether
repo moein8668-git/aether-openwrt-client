@@ -74,9 +74,24 @@ start_service() {
 	    return 1
 	fi
 
+	mkdir -p "$(dirname "$config_path")" 2>/dev/null
+	# Drop empty stubs so wg/gool can provision; keep valid identity files.
+	sanitize_identity_file "$config_path"
+	sanitize_identity_file "$(identity_sibling "$config_path" secondary)"
+	sanitize_identity_file "$(identity_sibling "$config_path" masque)"
+
+	# Only pass --config if the file has valid TOML content (device_id present).
+	# Empty/invalid config files cause Aether v1.5.0 to hang after loading sibling identity.
+	local config_arg=""
+	if [ -f "$config_path" ] && grep -q 'device_id' "$config_path" 2>/dev/null; then
+		config_arg="--config $config_path"
+	fi
+
+	logger -t aether "Starting Aether (protocol=$protocol, obfuscation=$obfuscation_profile)"
+
 	local cmd_args=""
-	cmd_args="$cmd_args --bind $socks_listen" 
-	cmd_args="$cmd_args --config $config_path"
+	cmd_args="$cmd_args --bind $socks_listen"
+	[ -n "$config_arg" ] && cmd_args="$cmd_args $config_arg"
 
 	case "$protocol" in
 		masque)  cmd_args="$cmd_args --masque" ;;
@@ -110,13 +125,6 @@ start_service() {
 	[ "$quick_reconnect" = "1" ] && cmd_args="$cmd_args --quick-reconnect"
 	[ "$no_data_check" = "1" ] && cmd_args="$cmd_args --no-data-check"
 
-	mkdir -p "$(dirname "$config_path")" 2>/dev/null
-	# Drop empty stubs so wg/gool can provision; keep valid identity files.
-	sanitize_identity_file "$config_path"
-	sanitize_identity_file "$(identity_sibling "$config_path" secondary)"
-	sanitize_identity_file "$(identity_sibling "$config_path" masque)"
-
-	logger -t aether "Starting Aether (protocol=$protocol, obfuscation=$obfuscation_profile)"
 	logger -t aether "Command: $PROG $cmd_args"
 
 	procd_open_instance
