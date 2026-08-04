@@ -164,7 +164,14 @@ function getServiceStatus() {
 	return Promise.all([
 		callServiceList('aether').then(function(res) {
 			try {
-				var inst = res.aether.instances.instance1;
+				var instances = res.aether.instances || {};
+				var inst = instances.core || instances.instance1;
+				if (!inst) {
+					var names = Object.keys(instances);
+					inst = names.length ? instances[names[0]] : null;
+				}
+				if (!inst)
+					return { running: false };
 				return { running: !!inst.running, pid: inst.pid, command: inst.command };
 			} catch (e) {
 				return { running: false };
@@ -209,7 +216,10 @@ function doServiceAction(action) {
 		var btn = this;
 		btn.disabled = true;
 		btn.value = '...';
-		callRCInit('aether', action).then(function() {
+		callFileExec('/usr/bin/aether-ctl', [ action ])
+		.then(function(result) {
+			if (!result || result.code !== 0)
+				throw new Error((result && result.stderr) || 'Service action failed');
 			setTimeout(function() { location.reload(); }, 3000);
 		}).catch(function() {
 			btn.disabled = false;
@@ -290,6 +300,7 @@ return view.extend({
 			row('State', E('span', {
 				'style': 'font-weight:bold;color:' + color
 			}, st.running ? 'Running' : 'Stopped'));
+			row('Enable on Boot', st.enabled === '1' ? 'Yes' : 'No');
 
 			if (st.running) {
 				if (st.version) row('Version', st.version);
@@ -539,6 +550,10 @@ return view.extend({
 				'Auto-start Aether when the router boots');
 			o.default = '0';
 			o.rmempty = false;
+			o.write = function(section_id, value) {
+				uci.set('aether', section_id, 'enabled', value);
+				return callRCInit('aether', value === '1' ? 'enable' : 'disable');
+			};
 
 			o = s.option(form.ListValue, 'protocol', 'Protocol');
 			o.value('masque', 'MASQUE (recommended)');
@@ -625,6 +640,29 @@ return view.extend({
 				aetherSyncMasqueOptions(masqueOptionOpts, section_id, proto);
 			};
 
+			s = m.section(form.NamedSection, 'main', 'aether', 'Zero Trust',
+				'Optional Cloudflare Zero Trust enrollment using a headless service token.');
+
+			o = s.option(form.Value, 'team', 'Team Name',
+				'The organization subdomain from <team>.cloudflareaccess.com');
+			o.rmempty = true;
+
+			o = s.option(form.Value, 'access_id', 'Access Client ID',
+				'Service-token client ID created in the Zero Trust dashboard');
+			o.rmempty = true;
+			o.depends('team', /.+/);
+
+			o = s.option(form.Value, 'access_secret', 'Access Client Secret',
+				'Stored in the root-only UCI configuration and never written to service logs');
+			o.password = true;
+			o.rmempty = true;
+			o.depends('team', /.+/);
+
+			o = s.option(form.Flag, 'gateway', 'Use Organization Gateway',
+				'Opt in to organization filtering and logging for HTTP/HTTPS traffic');
+			o.default = '0';
+			o.depends('team', /.+/);
+
 			s = m.section(form.NamedSection, 'main', 'aether', 'MASQUE Options');
 
 			o = s.option(form.Flag, 'http2_mode', 'HTTP/2 Mode',
@@ -676,8 +714,8 @@ return view.extend({
 			o.datatype = 'min(1)';
 
 			o = s.option(form.Flag, 'quick_reconnect', 'Quick Reconnect',
-				'Always reuse last known-good gateway without asking');
-			o.default = '0';
+				'Re-verify the last known-good gateway first, then scan if it is unavailable');
+			o.default = '1';
 
 			o = s.option(form.Flag, 'no_data_check', 'Skip Data Validation',
 				'Trust gateway after handshake only (faster but less reliable)');
@@ -686,6 +724,20 @@ return view.extend({
 			o = s.option(form.Value, 'config_path', 'Config Path');
 			o.default = '/etc/aether/aether.toml';
 			o.readonly = true;
+
+			o = s.option(form.Flag, 'watchdog_enabled', 'Data-plane Watchdog',
+				'Recover a stuck tunnel after repeated end-to-end SOCKS5 probe failures (requires curl)');
+			o.default = '1';
+
+			o = s.option(form.Value, 'watchdog_interval', 'Watchdog Interval (s)');
+			o.default = '60';
+			o.datatype = 'min(30)';
+			o.depends('watchdog_enabled', '1');
+
+			o = s.option(form.Value, 'watchdog_failures', 'Failures Before Recovery');
+			o.default = '3';
+			o.datatype = 'range(2,10)';
+			o.depends('watchdog_enabled', '1');
 
 			return m.render().then(function(formNode) {
 				el.appendChild(formNode);

@@ -6,6 +6,7 @@
 #   ./uninstall.sh --purge   # also remove config and identity data
 
 set -e
+umask 077
 
 PURGE=0
 for arg in "$@"; do
@@ -14,6 +15,10 @@ for arg in "$@"; do
         -h|--help)
             echo "Usage: $0 [--purge]"
             exit 0
+            ;;
+        *)
+            error "Unknown option: $arg"
+            exit 1
             ;;
     esac
 done
@@ -41,11 +46,15 @@ echo ""
 info "Stopping Aether..."
 /etc/init.d/aether stop 2>/dev/null || true
 killall aether 2>/dev/null || true
+killall aether-run 2>/dev/null || true
+killall aether-watchdog 2>/dev/null || true
 /etc/init.d/aether disable 2>/dev/null || true
 
 info "Removing files..."
 rm -f /usr/bin/aether
 rm -f /usr/bin/aether-ctl
+rm -f /usr/bin/aether-run
+rm -f /usr/bin/aether-watchdog
 rm -f /etc/init.d/aether
 rm -f /usr/libexec/rpcd/luci-app-aether
 rm -f /usr/share/rpcd/acl.d/luci-app-aether.json
@@ -58,7 +67,10 @@ if [ "$PURGE" -eq 1 ]; then
     rm -rf /etc/aether
 fi
 
+rm -f /tmp/luci-indexcache 2>/dev/null || true
+rm -rf /tmp/luci-modulecache 2>/dev/null || true
 /etc/init.d/rpcd restart 2>/dev/null || true
+/etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo ""
 info "Aether OpenWrt Client removed."

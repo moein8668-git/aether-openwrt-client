@@ -62,11 +62,11 @@ cmd_status() {
 	local procd_json procd_running
 
 	procd_json=$(ubus call service list '{"name":"aether"}' 2>/dev/null)
-	procd_running=$(echo "$procd_json" | jsonfilter -e '@.aether.instances.instance1.running' 2>/dev/null)
+	procd_running=$(echo "$procd_json" | jsonfilter -e '@.aether.instances.core.running' 2>/dev/null)
 
 	if [ "$procd_running" = "true" ]; then
 		running=1
-		pid=$(echo "$procd_json" | jsonfilter -e '@.aether.instances.instance1.pid' 2>/dev/null)
+		pid=$(echo "$procd_json" | jsonfilter -e '@.aether.instances.core.pid' 2>/dev/null)
 		uptime_s=$(cat /proc/uptime 2>/dev/null | cut -d. -f1)
 	fi
 

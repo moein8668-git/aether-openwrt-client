@@ -22,7 +22,15 @@ uci_get() { $UCI get "$CFG.$1" 2>/dev/null; }
 uci_set() { $UCI set "$CFG.$1=$2"; }
 
 is_running() {
-	pidof aether >/dev/null 2>&1
+	local running
+	running=$(ubus call service list '{"name":"aether"}' 2>/dev/null |
+		jsonfilter -e '@.aether.instances.core.running' 2>/dev/null)
+	[ "$running" = "true" ]
+}
+
+service_pid() {
+	ubus call service list '{"name":"aether"}' 2>/dev/null |
+		jsonfilter -e '@.aether.instances.core.pid' 2>/dev/null
 }
 
 wait_running() {
@@ -36,14 +44,12 @@ wait_running() {
 
 do_start() {
 	if is_running; then
-		log_warn "Aether is already running (PID $(pidof aether))"
+		log_warn "Aether is already running (PID $(service_pid))"
 		return 0
 	fi
-	uci_set enabled 1
-	$UCI commit aether
 	/etc/init.d/aether start
 	if wait_running; then
-		log_info "Aether started (PID $(pidof aether))"
+		log_info "Aether started (PID $(service_pid))"
 	else
 		log_err "Aether failed to start. Check: logread -e aether"
 		/etc/init.d/aether status 2>/dev/null
@@ -54,13 +60,9 @@ do_start() {
 do_stop() {
 	if ! is_running; then
 		log_warn "Aether is not running"
-		uci_set enabled 0
-		$UCI commit aether
 		return 0
 	fi
 	/etc/init.d/aether stop
-	uci_set enabled 0
-	$UCI commit aether
 	log_info "Aether stopped"
 }
 
@@ -68,7 +70,7 @@ do_restart() {
 	log_info "Restarting Aether..."
 	/etc/init.d/aether restart
 	if wait_running; then
-		log_info "Aether restarted (PID $(pidof aether))"
+		log_info "Aether restarted (PID $(service_pid))"
 	else
 		log_err "Aether failed to restart"
 		return 1
@@ -80,15 +82,9 @@ do_status() {
 	echo "=== Aether Status ==="
 	if is_running; then
 		log_key "State" "running"
-		log_key "PID" "$(pidof aether)"
+		log_key "PID" "$(service_pid)"
 	else
-		# Check if Aether is scanning
-		local recent_logs=$(logread -e aether -l 20 2>/dev/null)
-		if echo "$recent_logs" | grep -qiE 'scanning|scan |probing|candidate'; then
-			log_key "State" "scanning..."
-		else
-			log_key "State" "stopped"
-		fi
+		log_key "State" "stopped"
 	fi
 	echo ""
 	echo "=== Configuration ==="
@@ -121,8 +117,13 @@ do_show() {
 	local quick_reconnect=$(uci_get quick_reconnect)
 	local no_data_check=$(uci_get no_data_check)
 	local log_level=$(uci_get log_level)
+	local team=$(uci_get team)
+	local access_id=$(uci_get access_id)
+	local access_secret=$(uci_get access_secret)
+	local gateway=$(uci_get gateway)
+	local watchdog_enabled=$(uci_get watchdog_enabled)
 
-	log_key "Enabled" "$([ "$enabled" = "1" ] && echo "yes" || echo "no")"
+	log_key "Boot Enabled" "$([ "$enabled" = "1" ] && echo "yes" || echo "no")"
 	log_key "Protocol" "${protocol:-masque}"
 	log_key "SOCKS Listen" "${socks_listen:-0.0.0.0:1819}"
 	log_key "Scan Mode" "${scan_mode:-balanced}"
@@ -138,6 +139,13 @@ do_show() {
 	log_key "Quick Reconnect" "$([ "$quick_reconnect" = "1" ] && echo "on" || echo "off")"
 	log_key "No Data Check" "$([ "$no_data_check" = "1" ] && echo "on" || echo "off")"
 	log_key "Log Level" "${log_level:-info}"
+	log_key "Zero Trust Team" "${team:-disabled}"
+	if [ -n "$team" ]; then
+		log_key "Access Client ID" "$([ -n "$access_id" ] && echo "configured" || echo "missing")"
+		log_key "Access Secret" "$([ -n "$access_secret" ] && echo "configured (redacted)" || echo "missing")"
+		log_key "Gateway Proxy" "$([ "$gateway" = "1" ] && echo "on" || echo "off")"
+	fi
+	log_key "Data Watchdog" "$([ "$watchdog_enabled" = "0" ] && echo "off" || echo "on")"
 }
 
 do_test() {
@@ -244,6 +252,13 @@ do_set() {
 		echo "  quick_reconnect     0/1"
 		echo "  no_data_check       0/1"
 		echo "  log_level           info/debug/warn/error"
+		echo "  team                Zero Trust team name"
+		echo "  access_id           service-token client ID"
+		echo "  access_secret       service-token secret (redacted in output)"
+		echo "  gateway             0/1"
+		echo "  watchdog_enabled    0/1"
+		echo "  watchdog_interval   seconds"
+		echo "  watchdog_failures   failures before recovery"
 		return 1
 	fi
 
@@ -269,7 +284,7 @@ do_set() {
 				ipv4|ipv6|both) ;;
 				*) log_err "Invalid ip_version: $value (use ipv4/ipv6/both)"; return 1 ;;
 			esac ;;
-		http2_mode|fragment_tls|quick_reconnect|no_data_check)
+		http2_mode|fragment_tls|quick_reconnect|no_data_check|gateway|watchdog_enabled)
 			case "$value" in
 				0|1|on|off|yes|no)
 					case "$value" in
@@ -278,11 +293,31 @@ do_set() {
 					esac ;;
 				*) log_err "Invalid value: $value (use 0/1)"; return 1 ;;
 			esac ;;
+		keepalive|reconnect_secs|validate_secs|watchdog_interval|watchdog_failures|watchdog_startup_grace|watchdog_cooldown)
+			case "$value" in
+				''|*[!0-9]*) log_err "Invalid numeric value: $value"; return 1 ;;
+			esac ;;
+		socks_listen|obfuscation_profile|h2_peer|fragment_size|fragment_delay|peer|log_level|team|access_id|access_secret) ;;
+		*)
+			log_err "Unknown configuration option: $key"
+			return 1
+			;;
 	esac
 
 	uci_set "$key" "$value"
 	$UCI commit aether
-	log_info "Set $key = $value"
+	if [ "$key" = "enabled" ]; then
+		if [ "$value" = "1" ]; then
+			/etc/init.d/aether enable
+		else
+			/etc/init.d/aether disable
+		fi
+	fi
+	if [ "$key" = "access_secret" ]; then
+		log_info "Set access_secret = (redacted)"
+	else
+		log_info "Set $key = $value"
+	fi
 
 	if is_running; then
 		echo ""

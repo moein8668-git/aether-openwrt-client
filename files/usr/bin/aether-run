@@ -1,0 +1,18 @@
+#!/bin/sh
+# Root-only launcher that keeps Zero Trust credentials out of procd/ubus output.
+
+UCI=/sbin/uci
+
+team="$($UCI -q get aether.main.team 2>/dev/null)"
+if [ -n "$team" ]; then
+	access_id="$($UCI -q get aether.main.access_id 2>/dev/null)"
+	access_secret="$($UCI -q get aether.main.access_secret 2>/dev/null)"
+	gateway="$($UCI -q get aether.main.gateway 2>/dev/null)"
+
+	export AETHER_TEAM="$team"
+	export AETHER_ACCESS_CLIENT_ID="$access_id"
+	export AETHER_ACCESS_CLIENT_SECRET="$access_secret"
+	[ "$gateway" = "1" ] && export AETHER_GATEWAY=1
+fi
+
+exec /usr/bin/aether "$@"
