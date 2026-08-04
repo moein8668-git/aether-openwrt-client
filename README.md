@@ -1,5 +1,7 @@
 [فارسی](README-fa.md) | [English](README.md)
 
+Quick guide: [English client guide](CLIENT-GUIDE.en.md) | [راهنمای فارسی](CLIENT-GUIDE.fa.md)
+
 # Aether OpenWrt Client
 
 OpenWrt integration for [Aether](https://github.com/CluvexStudio/Aether) — a censorship circumvention client.
@@ -21,7 +23,7 @@ wget -qO /tmp/aether-install.sh https://raw.githubusercontent.com/moein8668-git/
 
 During install you will be asked:
 
-- **Install curl?** Defaults to **No**. curl is only needed for the connection test buttons in LuCI and it will take some storage. Without it the tunnel still works fine. Say `y` if you want the test feature.
+- **Install curl?** Defaults to **Yes**. curl enables LuCI connection tests and end-to-end watchdog recovery. Use `--no-curl` to skip it; the tunnel will work, but the watchdog will not start.
 
 ## What it does
 
@@ -29,6 +31,7 @@ During install you will be asked:
 2. Downloads the latest official Aether binary from [CluvexStudio/Aether releases](https://github.com/CluvexStudio/Aether/releases)
 3. Installs the Aether service (procd), CLI tool, and LuCI web interface
 4. Downloads support files (init script, LuCI app, CLI, config) from GitHub
+5. Verifies the downloaded Aether release with its SHA-256 checksum
 
 ## Features
 
@@ -39,6 +42,8 @@ During install you will be asked:
   - Connection test buttons with accurate millisecond timing
   - Real-time live logs (auto-updating, pause/resume, auto-scroll)
   - Full configuration (protocol, scan mode, obfuscation, HTTP/2, etc.)
+- **Recovery watchdog**: verifies traffic through SOCKS5 and restarts only a stuck core process after repeated failures
+- **Zero Trust**: headless organization enrollment with a Cloudflare Access service token
 - **Service**: procd integration, auto-start on boot
 - **Architecture**: x86_64, arm64, armv7 (musl static builds)
 
@@ -54,8 +59,10 @@ During install you will be asked:
 ## Uninstall
 
 ```sh
-./uninstall.sh           # remove files
-./uninstall.sh --purge   # also remove config and identity data
+wget -qO /tmp/aether-uninstall.sh https://raw.githubusercontent.com/moein8668-git/aether-openwrt-client/main/uninstall.sh
+chmod +x /tmp/aether-uninstall.sh
+/tmp/aether-uninstall.sh           # remove application files; keep config and identities
+/tmp/aether-uninstall.sh --purge   # also permanently remove config and identity data
 ```
 
 ## CLI commands
@@ -88,6 +95,10 @@ Features:
 - Clear logs button
 - Full configuration (protocol, scan mode, obfuscation, HTTP/2, etc.)
 
+After an update, if the new LuCI page or fields do not appear, use `Ctrl+F5`,
+an incognito/private window, or a different browser. Browser JavaScript caches
+can keep the previous interface.
+
 ## Manual update (from your PC)
 
 If you have the repo cloned locally and want to push updated files to your router without going through GitHub:
@@ -117,7 +128,10 @@ wget -qO /tmp/aether-install.sh https://raw.githubusercontent.com/moein8668-git/
 ## Notes
 
 - Requires OpenWrt 24.10+ with musl libc (apk on 25.12+, opkg on older)
-- `curl` is optional (asked during install, defaults to No). Only needed for LuCI connection test buttons.
+- `curl` is optional (asked during install, defaults to Yes). It enables LuCI connection tests and the data-plane recovery watchdog.
+- Zero Trust service-token secrets are kept in the root-only UCI config and redacted from CLI and service command output.
+- See [CLIENT-GUIDE.en.md](CLIENT-GUIDE.en.md) for the settings, protocols,
+  watchdog behavior, Zero Trust configuration, and troubleshooting.
 - This project is not affiliated with CluvexStudio
 
 ## License

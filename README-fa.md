@@ -1,5 +1,7 @@
 [فارسی](README-fa.md) | [English](README.md)
 
+راهنمای سریع: [راهنمای فارسی کلاینت](CLIENT-GUIDE.fa.md) | [English client guide](CLIENT-GUIDE.en.md)
+
 # Aether OpenWrt Client
 
 اینتگریشن OpenWrt برای [Aether](https://github.com/CluvexStudio/Aether) — یک کلاینت دور زدن سانسور.
@@ -21,7 +23,9 @@ wget -qO /tmp/aether-install.sh https://raw.githubusercontent.com/moein8668-git/
 
 در حین نصب از شما پرسیده می‌شود:
 
-- **curl نصب شود؟** به صورت پیش‌فرض **خیر**. curl فقط برای دکمه‌های تست اتصال در LuCI لازم است و فضای ذخیره‌سازی اشغال می‌کند. بدون آن تونل همچنان کار می‌کند. اگر قابلیت تست می‌خواهید `y` بزنید.
+- **curl نصب شود؟** به صورت پیش‌فرض **بله**. curl برای تست اتصال در LuCI و
+  watchdog بازیابی تونل لازم است. با `--no-curl` از آن صرف‌نظر کنید؛ تونل کار
+  می‌کند اما watchdog فعال نمی‌شود.
 
 ## این اسکریپت چه کاری انجام می‌دهد
 
@@ -29,6 +33,7 @@ wget -qO /tmp/aether-install.sh https://raw.githubusercontent.com/moein8668-git/
 2. آخرین فایل باینری رسمی Aether را از [ریلیزهای CluvexStudio/Aether](https://github.com/CluvexStudio/Aether/releases) دانلود می‌کند
 3. سرویس Aether (procd)، ابزار CLI، و رابط وب LuCI را نصب می‌کند
 4. فایل‌های پشتیبانی (اسکریپت init، اپ LuCI، CLI، کانفیگ) را از GitHub دانلود می‌کند
+5. checksum نوع SHA-256 فایل Aether دانلودشده را بررسی می‌کند
 
 ## قابلیت‌ها
 
@@ -40,6 +45,9 @@ wget -qO /tmp/aether-install.sh https://raw.githubusercontent.com/moein8668-git/
   - لاگ‌های زنده بلادرنگ (به‌روزرسانی خودکار، توقف/ادامه، اسکرول خودکار)
   - پیکربندی کامل (پروتکل، حالت اسکن، obfuscation، HTTP/2 و غیره)
 - **سرویس**: ادغام procd، شروع خودکار هنگام بوت
+- **watchdog بازیابی**: مسیر واقعی SOCKS5 را بررسی می‌کند و در صورت گیر کردن
+  هسته، پس از چند خطای متوالی آن را بازیابی می‌کند
+- **Zero Trust**: اتصال headless به سازمان با Access service token
 - **معماری**: x86_64، arm64، armv7 (باینری‌های استاتیک musl)
 
 ## گزینه‌های نصب
@@ -54,8 +62,10 @@ wget -qO /tmp/aether-install.sh https://raw.githubusercontent.com/moein8668-git/
 ## حذف نصب
 
 ```sh
-./uninstall.sh           # حذف فایل‌ها
-./uninstall.sh --purge   # حذف کانفیگ و داده‌های هویت نیز
+wget -qO /tmp/aether-uninstall.sh https://raw.githubusercontent.com/moein8668-git/aether-openwrt-client/main/uninstall.sh
+chmod +x /tmp/aether-uninstall.sh
+/tmp/aether-uninstall.sh           # حذف فایل‌های برنامه؛ حفظ کانفیگ و هویت‌ها
+/tmp/aether-uninstall.sh --purge   # حذف کانفیگ و داده‌های هویت نیز
 ```
 
 ## دستورات CLI
@@ -88,6 +98,11 @@ aether-ctl version
 - دکمه پاک کردن لاگ‌ها
 - پیکربندی کامل (پروتکل، حالت اسکن، obfuscation، HTTP/2 و غیره)
 
+اگر بعد از به‌روزرسانی صفحه جدید LuCI یا فیلدهای جدید را نمی‌بینید، با
+`Ctrl+F5` صفحه را hard refresh کنید یا از پنجره incognito/private و یا یک
+مرورگر جدید استفاده کنید. cache جاوااسکریپت مرورگر ممکن است رابط قبلی را
+نمایش دهد.
+
 ## به‌روزرسانی دستی (از کامپیوتر شما)
 
 اگر ریپو را به صورت محلی کلون کرده‌اید و می‌خواهید فایل‌های به‌روزرسانی شده را بدون عبور از GitHub به روتر خود منتقل کنید:
@@ -117,7 +132,12 @@ wget -qO /tmp/aether-install.sh https://raw.githubusercontent.com/moein8668-git/
 ## نکات
 
 - نیاز به OpenWrt 24.10+ با musl libc (apk روی 25.12+، opkg روی قدیمی‌تر)
-- `curl` اختیاری است (در حین نصب پرسیده می‌شود، به صورت پیش‌فرض خیر). فقط برای دکمه‌های تست اتصال LuCI لازم است.
+- `curl` اختیاری است (در حین نصب پرسیده می‌شود، به صورت پیش‌فرض بله). برای
+  تست اتصال LuCI و watchdog بازیابی تونل استفاده می‌شود.
+- Secretهای Zero Trust در UCI فقط برای root ذخیره و در خروجی CLI و فرمان سرویس
+  مخفی می‌شوند.
+- برای تنظیمات، پروتکل‌ها، watchdog، Zero Trust و عیب‌یابی، [راهنمای فارسی
+  کلاینت](CLIENT-GUIDE.fa.md) را ببینید.
 - این پروژه وابسته به CluvexStudio نیست
 
 ## مجوز

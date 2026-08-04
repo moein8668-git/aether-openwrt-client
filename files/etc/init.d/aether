@@ -1,13 +1,14 @@
 #!/bin/sh /etc/rc.common
 # Aether - censorship circumvention tunnel service
-# Note: do NOT gate start_service on UCI "enabled".
-# aether-ctl / LuCI handle enable-on-boot; calling this script always starts.
+# UCI "enabled" controls the boot symlink only. Explicit start/stop actions
+# always control the current runtime independently.
 
 START=99
 STOP=10
 
 USE_PROCD=1
 PROG=/usr/bin/aether
+RUNNER=/usr/bin/aether-run
 
 # Aether identity files: missing = provision new; empty/invalid = fatal TOML error.
 # MASQUE uses a sibling path (aether-masque.toml); wg/gool use the base path and
@@ -36,10 +37,12 @@ identity_sibling() {
 start_service() {
 	config_load aether
 
+	local watchdog_enabled
 	local protocol socks_listen scan_mode ip_version obfuscation_profile
 	local http2_mode h2_peer fragment_tls fragment_size fragment_delay peer
 	local keepalive reconnect_secs validate_secs quick_reconnect
 	local no_data_check config_path log_level
+	local team access_id access_secret
 
 	config_get protocol main protocol 'masque'
 	config_get socks_listen main socks_listen '0.0.0.0:1819'
@@ -55,23 +58,32 @@ start_service() {
 	config_get keepalive main keepalive '5'
 	config_get reconnect_secs main reconnect_secs '2'
 	config_get validate_secs main validate_secs '10'
-	config_get quick_reconnect main quick_reconnect '0'
+	config_get quick_reconnect main quick_reconnect '1'
 	config_get no_data_check main no_data_check '0'
 	config_get config_path main config_path '/etc/aether/aether.toml'
 	config_get log_level main log_level 'info'
+	config_get team main team ''
+	config_get access_id main access_id ''
+	config_get access_secret main access_secret ''
+	config_get_bool watchdog_enabled main watchdog_enabled 1
 
-	# Validate no spaces in values that become command arguments
-	local bad_val=""
-	case "$socks_listen" in  *" "*) bad_val="$bad_val socks_listen" ;; esac
-	case "$config_path" in  *" "*) bad_val="$bad_val config_path" ;; esac
-	case "$peer" in         *" "*) bad_val="$bad_val peer" ;; esac
-	case "$h2_peer" in      *" "*) bad_val="$bad_val h2_peer" ;; esac
-	case "$fragment_size" in *" "*) bad_val="$bad_val fragment_size" ;; esac
-	case "$fragment_delay" in *" "*) bad_val="$bad_val fragment_delay" ;; esac
-	if [ -n "$bad_val" ]; then
-	    logger -t aether "ERROR: spaces in config values:$bad_val — refusing to start"
-	    echo "aether: ERROR: spaces in config values:$bad_val" >&2
+	if { [ -n "$access_id" ] || [ -n "$access_secret" ]; } &&
+	   { [ -z "$team" ] || [ -z "$access_id" ] || [ -z "$access_secret" ]; }; then
+		logger -t aether "ERROR: Zero Trust requires team, access_id, and access_secret"
+		echo "aether: incomplete Zero Trust service-token configuration" >&2
+		return 1
+	fi
+	if [ -n "$team" ] && [ -z "$access_id" ]; then
+		logger -t aether "ERROR: Zero Trust team requires service-token credentials"
+		echo "aether: Zero Trust team configured without service-token credentials" >&2
 	    return 1
+	fi
+	local command="$PROG"
+	if [ -x "$RUNNER" ]; then
+		command="$RUNNER"
+	elif [ -n "$team" ]; then
+		logger -t aether "ERROR: Zero Trust launcher is missing: $RUNNER"
+		return 1
 	fi
 
 	mkdir -p "$(dirname "$config_path")" 2>/dev/null
@@ -80,59 +92,78 @@ start_service() {
 	sanitize_identity_file "$(identity_sibling "$config_path" secondary)"
 	sanitize_identity_file "$(identity_sibling "$config_path" masque)"
 
-	# Only pass --config if the file has valid TOML content (device_id present).
-	# Empty/invalid config files cause Aether v1.5.0 to hang after loading sibling identity.
-	local config_arg=""
-	if [ -f "$config_path" ] && grep -q 'device_id' "$config_path" 2>/dev/null; then
-		config_arg="--config $config_path"
-	fi
-
-	logger -t aether "Starting Aether (protocol=$protocol, obfuscation=$obfuscation_profile)"
-
-	local cmd_args=""
-	cmd_args="$cmd_args --bind $socks_listen"
-	[ -n "$config_arg" ] && cmd_args="$cmd_args $config_arg"
-
+	procd_open_instance "core"
+	procd_set_param command "$command"
+	procd_append_param command --bind "$socks_listen"
+	procd_append_param command --config "$config_path"
 	case "$protocol" in
-		masque)  cmd_args="$cmd_args --masque" ;;
-		wg)      cmd_args="$cmd_args --wg" ;;
-		gool)    cmd_args="$cmd_args --gool" ;;
+		masque)
+			procd_append_param command --masque
+			case "$obfuscation_profile" in firewall|gfw|off) ;; *) obfuscation_profile=firewall ;; esac
+			;;
+		wg)
+			procd_append_param command --wg
+			case "$obfuscation_profile" in balanced|aggressive|light|off) ;; *) obfuscation_profile=balanced ;; esac
+			;;
+		gool)
+			procd_append_param command --gool
+			case "$obfuscation_profile" in balanced|aggressive|light|off) ;; *) obfuscation_profile=balanced ;; esac
+			;;
+		*)
+			logger -t aether "ERROR: invalid protocol: $protocol"
+			procd_close_instance
+			return 1
+			;;
 	esac
+	logger -t aether "Starting Aether (protocol=$protocol, config=$config_path, obfuscation=$obfuscation_profile)"
 
 	case "$scan_mode" in
 		turbo|balanced|thorough|stealth|ironclad)
-			cmd_args="$cmd_args --scan $scan_mode" ;;
+			procd_append_param command --scan "$scan_mode" ;;
 	esac
 
 	case "$ip_version" in
-		ipv4)  cmd_args="$cmd_args -4" ;;
-		ipv6)  cmd_args="$cmd_args -6" ;;
-		both)  cmd_args="$cmd_args --dual" ;;
+		ipv4)  procd_append_param command -4 ;;
+		ipv6)  procd_append_param command -6 ;;
+		both)  procd_append_param command --dual ;;
 	esac
 
-	[ -n "$obfuscation_profile" ] && cmd_args="$cmd_args --noize $obfuscation_profile"
-	[ "$http2_mode" = "1" ] && cmd_args="$cmd_args --h2"
-	[ -n "$h2_peer" ] && [ "$http2_mode" = "1" ] && cmd_args="$cmd_args --h2-peer $h2_peer"
-	if [ "$fragment_tls" = "1" ]; then
-		cmd_args="$cmd_args --fragment"
-		[ -n "$fragment_size" ] && cmd_args="$cmd_args --fragment-size $fragment_size"
-		[ -n "$fragment_delay" ] && cmd_args="$cmd_args --fragment-delay $fragment_delay"
+	[ -n "$obfuscation_profile" ] && procd_append_param command --noize "$obfuscation_profile"
+	if [ "$protocol" = "masque" ]; then
+		[ "$http2_mode" = "1" ] && procd_append_param command --h2
+		[ -n "$h2_peer" ] && [ "$http2_mode" = "1" ] &&
+			procd_append_param command --h2-peer "$h2_peer"
+		if [ "$fragment_tls" = "1" ]; then
+			procd_append_param command --fragment
+			[ -n "$fragment_size" ] && procd_append_param command --fragment-size "$fragment_size"
+			[ -n "$fragment_delay" ] && procd_append_param command --fragment-delay "$fragment_delay"
+		fi
 	fi
-	[ -n "$peer" ] && cmd_args="$cmd_args --peer $peer"
-	[ "$protocol" != "masque" ] && cmd_args="$cmd_args --keepalive $keepalive"
-	cmd_args="$cmd_args --reconnect-secs $reconnect_secs"
-	cmd_args="$cmd_args --validate-secs $validate_secs"
-	[ "$quick_reconnect" = "1" ] && cmd_args="$cmd_args --quick-reconnect"
-	[ "$no_data_check" = "1" ] && cmd_args="$cmd_args --no-data-check"
-
-	logger -t aether "Command: $PROG $cmd_args"
-
-	procd_open_instance
-	procd_set_param command $PROG $cmd_args
-	procd_set_param respawn 3600 5 5
+	[ -n "$peer" ] && procd_append_param command --peer "$peer"
+	[ "$protocol" != "masque" ] && procd_append_param command --keepalive "$keepalive"
+	procd_append_param command --reconnect-secs "$reconnect_secs"
+	procd_append_param command --validate-secs "$validate_secs"
+	procd_append_param command --log-level "$log_level"
+	[ "$quick_reconnect" = "1" ] && procd_append_param command --quick-reconnect
+	[ "$quick_reconnect" = "0" ] && procd_append_param command --no-quick-reconnect
+	[ "$no_data_check" = "1" ] && procd_append_param command --no-data-check
+	# Reset the crash counter after 30 seconds of healthy runtime. The old
+	# one-hour threshold permanently stopped recovery after several unrelated
+	# WireGuard/gool drops within an hour.
+	procd_set_param respawn 30 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
+
+	if [ "$watchdog_enabled" -eq 1 ] && [ -x /usr/bin/aether-watchdog ] &&
+	   command -v curl >/dev/null 2>&1; then
+		procd_open_instance "watchdog"
+		procd_set_param command /usr/bin/aether-watchdog
+		procd_set_param respawn 30 5 5
+		procd_set_param stdout 1
+		procd_set_param stderr 1
+		procd_close_instance
+	fi
 }
 
 stop_service() {

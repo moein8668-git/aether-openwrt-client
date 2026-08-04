@@ -1,0 +1,129 @@
+#!/bin/sh
+# Data-plane watchdog for the procd-managed Aether process.
+
+UCI=/sbin/uci
+TAG=aether-watchdog
+
+get_config() {
+	$UCI -q get "aether.main.$1" 2>/dev/null
+}
+
+log() {
+	logger -t "$TAG" "$*"
+}
+
+core_pid() {
+	ubus call service list '{"name":"aether"}' 2>/dev/null |
+		jsonfilter -e '@.aether.instances.core.pid' 2>/dev/null
+}
+
+local_socks_address() {
+	local listen host port
+	listen="$(get_config socks_listen)"
+	[ -n "$listen" ] || listen="0.0.0.0:1819"
+	host="${listen%:*}"
+	port="${listen##*:}"
+	case "$host" in
+		0.0.0.0|'') host=127.0.0.1 ;;
+		'::'|'[::]') host='[::1]' ;;
+	esac
+	echo "${host}:${port}"
+}
+
+probe_data_plane() {
+	local socks="$1" result
+	result="$(curl -sS -o /dev/null -w '%{http_code}' \
+		--socks5-hostname "$socks" \
+		--connect-timeout 10 --max-time 20 \
+		https://cp.cloudflare.com/generate_204 2>/dev/null)" || return 1
+	case "$result" in
+		200|204) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+recover_core() {
+	local pid="$1" wait_count=0 config_path config_dir cache
+	[ -n "$pid" ] || {
+		log "core process is absent; procd will handle recovery"
+		return
+	}
+
+	config_path="$(get_config config_path)"
+	[ -n "$config_path" ] || config_path=/etc/aether/aether.toml
+	config_dir="${config_path%/*}"
+	for cache in "$config_dir"/*-lastconn.toml; do
+		[ -f "$cache" ] || continue
+		rm -f "$cache" &&
+			log "removed stale last-connection cache: $cache"
+	done
+
+	log "data plane failed repeatedly; terminating core pid=$pid for clean procd recovery"
+	kill -TERM "$pid" 2>/dev/null || return
+	while kill -0 "$pid" 2>/dev/null && [ "$wait_count" -lt 10 ]; do
+		sleep 1
+		wait_count=$((wait_count + 1))
+	done
+	if kill -0 "$pid" 2>/dev/null; then
+		log "core did not exit after 10 seconds; forcing termination"
+		kill -KILL "$pid" 2>/dev/null
+	fi
+}
+
+if ! command -v curl >/dev/null 2>&1; then
+	log "curl is unavailable; data-plane watchdog disabled"
+	exit 0
+fi
+command -v jsonfilter >/dev/null 2>&1 || {
+	log "jsonfilter is unavailable; data-plane watchdog disabled"
+	exit 0
+}
+
+interval="$(get_config watchdog_interval)"
+failures_required="$(get_config watchdog_failures)"
+startup_grace="$(get_config watchdog_startup_grace)"
+cooldown="$(get_config watchdog_cooldown)"
+
+case "$interval" in ''|*[!0-9]*) interval=60 ;; esac
+case "$failures_required" in ''|*[!0-9]*) failures_required=3 ;; esac
+case "$startup_grace" in ''|*[!0-9]*) startup_grace=120 ;; esac
+case "$cooldown" in ''|*[!0-9]*) cooldown=300 ;; esac
+
+socks="$(local_socks_address)"
+last_pid=""
+failures=0
+
+log "started (socks=$socks interval=${interval}s failures=$failures_required)"
+
+while true; do
+	pid="$(core_pid)"
+	if [ -z "$pid" ]; then
+		failures=0
+		sleep "$interval"
+		continue
+	fi
+
+	if [ "$pid" != "$last_pid" ]; then
+		last_pid="$pid"
+		failures=0
+		log "observed core pid=$pid; allowing ${startup_grace}s startup grace"
+		sleep "$startup_grace"
+	fi
+
+	if probe_data_plane "$socks"; then
+		[ "$failures" -gt 0 ] && log "data plane recovered after $failures failed probe(s)"
+		failures=0
+	else
+		failures=$((failures + 1))
+		log "data-plane probe failed ($failures/$failures_required) for core pid=$pid"
+		if [ "$failures" -ge "$failures_required" ]; then
+			recover_core "$pid"
+			failures=0
+			last_pid=""
+			sleep "$cooldown"
+			continue
+		fi
+	fi
+
+	sleep "$interval"
+done
