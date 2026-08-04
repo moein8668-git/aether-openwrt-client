@@ -94,7 +94,7 @@ done
 
 # --- Fetch latest release info ---
 info "Fetching latest release from GitHub..."
-RELEASE_JSON=$(wget -qO- "$API_URL" 2>/dev/null) || {
+RELEASE_JSON=$(wget -4 -T 30 -qO- "$API_URL" 2>/dev/null) || {
     error "Failed to reach GitHub API. Check internet connection."
     exit 1
 }
@@ -106,35 +106,37 @@ if [ -z "$TAG_NAME" ]; then
 fi
 success "Latest release: $TAG_NAME"
 
-# --- Find download URL ---
-ASSET_URL=$(echo "$RELEASE_JSON" | grep -o "\"browser_download_url\": *\"[^\"]*${ARCHIVE}\"" | sed -E 's/.*"(https[^"]+)"/\1/' | head -n1)
-if [ -z "$ASSET_URL" ]; then
-    error "No asset found: $ARCHIVE"
-    error "This architecture may not have a prebuilt binary."
-    exit 1
-fi
+# --- Build canonical download URL ---
+# Do not parse browser_download_url from the API response. BusyBox grep/sed
+# variants can select or rewrite the URL differently, while GitHub's canonical
+# release URL is stable and wget follows its signed redirect correctly.
+ASSET_URL="https://github.com/${REPO}/releases/download/${TAG_NAME}/${ARCHIVE}"
 
 # --- Download ---
 TMP_DIR=$(mktemp -d /tmp/aether-install.XXXXXX)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 info "Downloading $ARCHIVE..."
-wget -q -O "$TMP_DIR/$ARCHIVE" "$ASSET_URL" || {
+wget -4 -T 120 -O "$TMP_DIR/$ARCHIVE" "$ASSET_URL" || {
     error "Download failed."
+    exit 1
+}
+[ -s "$TMP_DIR/$ARCHIVE" ] || {
+    error "Downloaded archive is empty."
     exit 1
 }
 
 # --- Verify release checksum ---
 CHECKSUM_URL="${ASSET_URL}.sha256"
 info "Verifying checksum..."
-wget -q -O "$TMP_DIR/$ARCHIVE.sha256" "$CHECKSUM_URL" || {
+wget -4 -T 30 -O "$TMP_DIR/$ARCHIVE.sha256" "$CHECKSUM_URL" || {
     error "Could not download the release checksum."
     exit 1
 }
-EXPECTED_HASH=$(awk '{print $1}' "$TMP_DIR/$ARCHIVE.sha256" | tr -d '[:space:]')
-ACTUAL_HASH=$(sha256sum "$TMP_DIR/$ARCHIVE" | awk '{print $1}')
-if [ -z "$EXPECTED_HASH" ] || [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
+if ! (cd "$TMP_DIR" && sha256sum -c "$ARCHIVE.sha256" >/dev/null 2>&1); then
     error "Checksum verification failed. Aborting."
+    error "Expected file: $TMP_DIR/$ARCHIVE"
+    error "Checksum file: $TMP_DIR/$ARCHIVE.sha256"
     exit 1
 fi
 success "Checksum verified"
@@ -230,9 +232,10 @@ sleep 1
 
 # --- Install staged files ---
 install_staged() {
-    local rel="$1" dst="/$1"
+    local rel="$1" mode="$2" dst="/$1"
     mkdir -p "$(dirname "$dst")" &&
-        cp -f "$STAGE_ROOT/$rel" "$dst" || {
+        cp -f "$STAGE_ROOT/$rel" "$dst" &&
+        chmod "$mode" "$dst" || {
         error "Failed to install $dst"
         return 1
     }
@@ -248,20 +251,20 @@ success "Installed /usr/bin/aether"
 if [ -f /etc/config/aether ] && [ "$FORCE_CONFIG" -eq 0 ]; then
     warn "Keeping existing /etc/config/aether"
 else
-    install_staged "etc/config/aether" || exit 1
+    install_staged "etc/config/aether" 600 || exit 1
 fi
 chmod 600 /etc/config/aether || {
     error "Failed to protect /etc/config/aether"
     exit 1
 }
-install_staged "etc/init.d/aether" &&
-install_staged "usr/bin/aether-ctl" &&
-install_staged "usr/bin/aether-run" &&
-install_staged "usr/bin/aether-watchdog" &&
-install_staged "usr/libexec/rpcd/luci-app-aether" &&
-install_staged "usr/share/rpcd/acl.d/luci-app-aether.json" &&
-install_staged "usr/share/luci/menu.d/luci-app-aether.json" &&
-install_staged "www/luci-static/resources/view/aether.js" || exit 1
+install_staged "etc/init.d/aether" 755 &&
+install_staged "usr/bin/aether-ctl" 755 &&
+install_staged "usr/bin/aether-run" 755 &&
+install_staged "usr/bin/aether-watchdog" 755 &&
+install_staged "usr/libexec/rpcd/luci-app-aether" 755 &&
+install_staged "usr/share/rpcd/acl.d/luci-app-aether.json" 644 &&
+install_staged "usr/share/luci/menu.d/luci-app-aether.json" 644 &&
+install_staged "www/luci-static/resources/view/aether.js" 644 || exit 1
 
 # --- Identity storage ---
 # Only create the directory. Do NOT touch an empty aether.toml — Aether
