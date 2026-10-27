@@ -17,9 +17,44 @@ core_pid() {
 		jsonfilter -e '@.aether.instances.core.pid' 2>/dev/null
 }
 
+# Prints the value of a flag (space or "=" form) found in a manual command line,
+# or nothing. Same helper as /usr/bin/aether-ctl: in manual command mode the
+# running listener comes from custom_command, never from UCI.
+manual_opt() {
+	local args flag w prev val
+	args="$1"
+	flag="$2"
+	prev=""
+	val=""
+	for w in $args; do
+		if [ -n "$prev" ]; then
+			val="$w"
+			break
+		fi
+		case "$w" in
+			"$flag") prev=1 ;;
+			"$flag="*) val="${w#*=}" ;;
+		esac
+	done
+	echo "$val"
+}
+
+# The SOCKS5 address to probe, or nothing when it cannot be known. Manual command
+# mode bypasses every UCI option, so socks_listen there is a different port than
+# the core really listens on; probing it would kill a healthy tunnel.
 local_socks_address() {
-	local listen host port
-	listen="$(get_config socks_listen)"
+	local listen host port mode custom
+	mode="$(get_config command_mode)"
+	if [ "$mode" = "manual" ]; then
+		custom="$(get_config custom_command)"
+		listen="$(manual_opt "$custom" --bind)"
+		[ -n "$listen" ] || listen="$(manual_opt "$custom" --socks)"
+		# Unknown listener: report nothing so the caller disables itself
+		# instead of probing a port the core never opened.
+		[ -n "$listen" ] || { echo ""; return 0; }
+	else
+		listen="$(get_config socks_listen)"
+	fi
 	[ -n "$listen" ] || listen="0.0.0.0:1819"
 	host="${listen%:*}"
 	port="${listen##*:}"
@@ -89,7 +124,27 @@ case "$failures_required" in ''|*[!0-9]*) failures_required=3 ;; esac
 case "$startup_grace" in ''|*[!0-9]*) startup_grace=120 ;; esac
 case "$cooldown" in ''|*[!0-9]*) cooldown=300 ;; esac
 
+# Exit-location hunting keeps SOCKS closed until a wanted country answers, so a
+# 120s grace can kill a still-legal scan. Only a real country spec earns the
+# longer grace: a missing option, an empty value, "off" and "auto" all mean the
+# policy is disabled (init.d and aether-ctl store the literal token off).
+exit_loc="$(get_config exit_loc)"
+case "$exit_loc" in
+	''|off|auto) ;;
+	*)
+		[ "$startup_grace" -lt 180 ] 2>/dev/null && startup_grace=180
+		;;
+esac
+
 socks="$(local_socks_address)"
+if [ -z "$socks" ]; then
+	# Manual mode with no --bind/--socks: the real listener is unknown, so
+	# probing would be guesswork. Stay out of the way instead of killing a
+	# healthy tunnel. Idle instead of exiting: procd restarts a child that
+	# exits, which would log this line every few seconds.
+	log "manual command mode without --bind/--socks; data-plane watchdog idle"
+	while true; do sleep 3600; done
+fi
 last_pid=""
 failures=0
 

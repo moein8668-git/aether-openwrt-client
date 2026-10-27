@@ -21,4 +21,10 @@ if [ -n "$team" ]; then
 	[ "$gateway" = "1" ] && export AETHER_GATEWAY=1
 fi
 
+# Core v2.4 pins the MASQUE gateway certificate by default with --team. The
+# only way to turn that off is this environment variable (there is no flag),
+# so tls_verify=0 is applied here. It is not a secret.
+tls_verify="$($UCI -q get aether.main.tls_verify 2>/dev/null)"
+[ "$tls_verify" = "0" ] && export AETHER_TLS_VERIFY=0
+
 exec /usr/bin/aether "$@"

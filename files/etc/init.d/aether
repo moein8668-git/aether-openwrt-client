@@ -94,6 +94,82 @@ core_supports_v20() {
 	[ "$major" -ge 2 ] 2>/dev/null
 }
 
+# v2.1 adds exit-location policy, Psiphon, Tor relays/HTTP, and --stats.
+core_supports_v21() {
+	local version="$1" major minor rest
+	major="${version%%.*}"
+	rest="${version#*.}"
+	minor="${rest%%.*}"
+	[ "$major" -gt 2 ] 2>/dev/null ||
+		{ [ "$major" -eq 2 ] 2>/dev/null && [ "$minor" -ge 1 ] 2>/dev/null; }
+}
+
+# v2.3 splits gool: --gool is WireGuard carried inside MASQUE and the older
+# WireGuard-in-WireGuard transport moved to --gool-classic. It also adds
+# --gool-peer, --register, --tls-verify, --tls-ciphers, --ech-dns/--ech-domain.
+core_supports_v23() {
+	local version="$1" major minor rest
+	major="${version%%.*}"
+	rest="${version#*.}"
+	minor="${rest%%.*}"
+	[ "$major" -gt 2 ] 2>/dev/null ||
+		{ [ "$major" -eq 2 ] 2>/dev/null && [ "$minor" -ge 3 ] 2>/dev/null; }
+}
+
+# v2.4 adds --masque-sni, --api-address/--api-host/--api-sni, the rest of the
+# TLS fingerprint options, held listeners, and refuses an undialable --upstream.
+core_supports_v24() {
+	local version="$1" major minor rest
+	major="${version%%.*}"
+	rest="${version#*.}"
+	minor="${rest%%.*}"
+	[ "$major" -gt 2 ] 2>/dev/null ||
+		{ [ "$major" -eq 2 ] 2>/dev/null && [ "$minor" -ge 4 ] 2>/dev/null; }
+}
+
+# Validate --upstream the way core 2.4 does before it will start:
+# [scheme://][user:pass@]host:port with port 1-65535. Schemes: socks5,
+# socks5h, http. https is accepted only without credentials. Core 2.3 and
+# older silently connected around a proxy they could not dial; refusing here
+# keeps that from ever happening on any core version.
+valid_upstream() {
+	local url="$1" scheme="" rest hostport host port
+	[ -n "$url" ] || return 1
+	case "$url" in
+		*://*)
+			scheme="${url%%://*}"
+			rest="${url#*://}"
+			;;
+		*) rest="$url" ;;
+	esac
+	case "$scheme" in
+		''|socks5|socks5h|http) ;;
+		https)
+			case "$rest" in *@*) return 1 ;; esac ;;
+		*) return 1 ;;
+	esac
+	rest="${rest%%/*}"
+	hostport="${rest##*@}"
+	[ -n "$hostport" ] || return 1
+	case "$hostport" in
+		'['*']:'*)
+			host="${hostport%%]:*}"
+			host="${host#[}"
+			port="${hostport##*]:}"
+			;;
+		'['*) return 1 ;;
+		*:*)
+			host="${hostport%:*}"
+			port="${hostport##*:}"
+			case "$host" in *:*) return 1 ;; esac
+			;;
+		*) return 1 ;;
+	esac
+	[ -n "$host" ] || return 1
+	case "$port" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null
+}
+
 # Automatic performance profile from total RAM. Thresholds follow the
 # measured RSS table in CLIENT-GUIDE.en.md (core 1.9.0, x86_64): peak RSS
 # stays under the next-lower boundary with headroom for id-load spikes.
@@ -155,6 +231,38 @@ finish_service_instances() {
 		procd_close_instance
 	fi
 }
+# Core v2.4 TLS fingerprint and WARP-API options. Every option is empty/off
+# by default so the core keeps its Chrome-like defaults. Value options pass
+# their UCI string straight to the matching flag; switch options add the flag
+# only when set to 1. Called inside an open procd instance.
+append_tls_options() {
+	local pair opt flag val
+	for pair in \
+		tls_ciphers:--tls-ciphers tls13_ciphers:--tls13-ciphers \
+		tls_groups:--tls-groups tls_key_shares:--tls-key-shares \
+		tls_sigalgs:--tls-sigalgs tls_cert_compression:--tls-cert-compression \
+		tls_alps:--tls-alps tls_trust_anchors:--tls-trust-anchors \
+		tls_server_padding:--tls-server-padding; do
+		opt="${pair%%:*}"
+		flag="${pair#*:}"
+		config_get val main "$opt" ''
+		[ -n "$val" ] && procd_append_param command "$flag" "$val"
+	done
+	for pair in \
+		disable_grease:--disable-grease \
+		enable_grease_sigalgs:--enable-grease-sigalgs \
+		enable_ech_grease:--enable-ech-grease \
+		disable_ocsp_stapling:--disable-ocsp-stapling \
+		disable_sct:--disable-sct \
+		disable_session_ticket:--disable-session-ticket \
+		disable_extension_permutation:--disable-extension-permutation; do
+		opt="${pair%%:*}"
+		flag="${pair#*:}"
+		config_get val main "$opt" '0'
+		[ "$val" = "1" ] && procd_append_param command "$flag"
+	done
+}
+
 start_service() {
 	config_load aether
 
@@ -166,9 +274,15 @@ start_service() {
 	local no_profile_retry team access_id access_secret access_token
 	local upstream_proxy perf_profile wiw_outer wiw_inner mim_outer mim_inner mim_peers
 	local quic_v2 ech tor_mode tor_bind tor_dir tor_bridges masque_identity_path
+	local tor_relays tor_relay_ports tor_bridge_file tor_http
+	local exit_loc exit_loc_secs stats stats_secs
+	local psiphon_mode psiphon_bind psiphon_http psiphon_front psiphon_region psiphon_dir
 	local command_mode custom_command
 	local manual_args
-	local installed_version supports_v16 supports_v17 supports_v18 supports_v19 supports_v20
+	local gool_mode gool_peer masque_sni api_address api_host api_sni tls_verify
+	local ech_dns ech_domain gool_modern reverse_ok
+	local installed_version supports_v16 supports_v17 supports_v18 supports_v19 supports_v20 supports_v21
+	local supports_v23 supports_v24
 
 	installed_version="$(core_version)"
 	if [ -z "$installed_version" ]; then
@@ -201,7 +315,31 @@ start_service() {
 	else
 		supports_v20=0
 	fi
+	if core_supports_v21 "$installed_version"; then
+		supports_v21=1
+	else
+		supports_v21=0
+	fi
+	if core_supports_v23 "$installed_version"; then
+		supports_v23=1
+	else
+		supports_v23=0
+	fi
+	if core_supports_v24 "$installed_version"; then
+		supports_v24=1
+	else
+		supports_v24=0
+	fi
 	config_get protocol main protocol 'masque'
+	config_get gool_mode main gool_mode 'modern'
+	config_get gool_peer main gool_peer ''
+	config_get masque_sni main masque_sni ''
+	config_get api_address main api_address ''
+	config_get api_host main api_host ''
+	config_get api_sni main api_sni ''
+	config_get tls_verify main tls_verify ''
+	config_get ech_dns main ech_dns ''
+	config_get ech_domain main ech_domain ''
 	config_get socks_listen main socks_listen '0.0.0.0:1819'
 	config_get http_proxy main http_proxy ''
 	config_get perf_profile main perf_profile 'low'
@@ -216,6 +354,25 @@ start_service() {
 	config_get tor_bind main tor_bind '127.0.0.1:1820'
 	config_get tor_dir main tor_dir ''
 	config_get tor_bridges main tor_bridges 'auto'
+	config_get tor_relays main tor_relays 'auto'
+	config_get tor_relay_ports main tor_relay_ports 'web'
+	config_get tor_bridge_file main tor_bridge_file ''
+	config_get tor_http main tor_http ''
+	# exit_loc is a policy, not a default: a fresh install gets its "!IR" from
+	# /etc/config/aether, while a missing or empty option means "no policy".
+	# Never default this to a spec here: `aether-ctl set exit_loc off` stores the
+	# literal token off, and an empty write deletes the option, so a non-empty
+	# default would silently re-enable the policy.
+	config_get exit_loc main exit_loc ''
+	config_get exit_loc_secs main exit_loc_secs '60'
+	config_get psiphon_mode main psiphon_mode 'off'
+	config_get psiphon_bind main psiphon_bind '127.0.0.1:1821'
+	config_get psiphon_http main psiphon_http ''
+	config_get psiphon_front main psiphon_front 'auto'
+	config_get psiphon_region main psiphon_region ''
+	config_get psiphon_dir main psiphon_dir ''
+	config_get stats main stats '0'
+	config_get stats_secs main stats_secs '60'
 	config_get command_mode main command_mode 'generated'
 	config_get custom_command main custom_command ''
 	config_get upstream_proxy main upstream_proxy ''
@@ -225,7 +382,7 @@ start_service() {
 	config_get http2_mode main http2_mode '0'
 	config_get h2_peer main h2_peer ''
 	config_get fragment_tls main fragment_tls '0'
-	config_get fragment_size main fragment_size '16-32'
+	config_get fragment_size main fragment_size '8-16'
 	config_get fragment_delay main fragment_delay '2-10'
 	config_get peer main peer ''
 	config_get keepalive main keepalive '5'
@@ -255,6 +412,31 @@ start_service() {
 		echo "aether: Zero Trust team needs access_token or access_id/access_secret" >&2
 	    return 1
 	fi
+	# Core v2.4 refuses an --upstream it cannot dial (no port, port 0, unknown
+	# kind) at startup, and older cores silently connected around it. Refuse
+	# here on every core so a typo is a clear log line, never a crash loop or
+	# an unproxied connection. Manual command mode is the operator's call.
+	if [ "$command_mode" != "manual" ] && [ -n "$upstream_proxy" ] &&
+	   [ "$supports_v17" -eq 1 ] && ! valid_upstream "$upstream_proxy"; then
+		logger -t aether "ERROR: upstream_proxy is not dialable (need [scheme://][user:pass@]host:port, port 1-65535, scheme socks5/socks5h/http)"
+		echo "aether: invalid upstream_proxy; fix it with: aether-ctl set upstream_proxy <host:port>" >&2
+		return 1
+	fi
+
+	# Modern gool (core v2.3+) runs WireGuard inside MASQUE; it is the default
+	# there. Older cores only have the classic WireGuard-in-WireGuard gool.
+	gool_modern=0
+	if [ "$protocol" = "gool" ] && [ "$supports_v23" -eq 1 ] && [ "$gool_mode" != "classic" ]; then
+		gool_modern=1
+	fi
+	# Reverse Tor/Psiphon runs MASQUE over HTTP/2 through the carrier, so any
+	# MASQUE-side transport works: masque, MASQUE-in-MASQUE and the modern gool.
+	# The core refuses only --wg and --gool-classic ("aether --help").
+	reverse_ok=0
+	if [ "$protocol" = "masque" ] || [ "$protocol" = "mim" ] || [ "$gool_modern" -eq 1 ]; then
+		reverse_ok=1
+	fi
+
 	local command="$PROG"
 	if [ -x "$RUNNER" ]; then
 		command="$RUNNER"
@@ -271,6 +453,8 @@ start_service() {
 	sanitize_identity_file "$(identity_sibling "$config_path" secondary)"
 	sanitize_identity_file "$masque_identity_path"
 	sanitize_identity_file "$(identity_sibling "$masque_identity_path" secondary)"
+	# Modern gool keeps its WireGuard key beside the MASQUE identity.
+	sanitize_identity_file "$(identity_sibling "$masque_identity_path" gool)"
 
 	procd_open_instance "core"
 	procd_set_param command "$command"
@@ -325,11 +509,17 @@ start_service() {
 		fi
 		procd_append_param command --perf "$perf_profile"
 	fi
-	# Core v1.9+ dual-hop gool endpoints. Named hops are kept across
-	# reconnects by the core; unnamed hops are scanned as before.
-	if [ "$supports_v19" -eq 1 ] && [ "$protocol" = "gool" ]; then
+	# Core v1.9+ dual-hop classic gool endpoints. Named hops are kept across
+	# reconnects by the core; unnamed hops are scanned as before. On core
+	# v2.3+ ANY --wiw-* flag selects the classic gool, so these must never be
+	# emitted for the modern (WireGuard-in-MASQUE) gool.
+	if [ "$supports_v19" -eq 1 ] && [ "$protocol" = "gool" ] && [ "$gool_modern" -eq 0 ]; then
 		[ -n "$wiw_outer" ] && procd_append_param command --wiw-outer "$wiw_outer"
 		[ -n "$wiw_inner" ] && procd_append_param command --wiw-inner "$wiw_inner"
+	fi
+	# Modern gool dials its WireGuard hop from inside the MASQUE tunnel.
+	if [ "$gool_modern" -eq 1 ] && [ -n "$gool_peer" ]; then
+		procd_append_param command --gool-peer "$gool_peer"
 	fi
 	# Core v2 MASQUE-in-MASQUE endpoints are separate from gool endpoints.
 	if [ "$supports_v20" -eq 1 ] && [ "$protocol" = "mim" ]; then
@@ -347,8 +537,20 @@ start_service() {
 			case "$obfuscation_profile" in balanced|aggressive|light|off) ;; *) obfuscation_profile=balanced ;; esac
 			;;
 		gool)
-			procd_append_param command --gool
-			case "$obfuscation_profile" in balanced|aggressive|light|off) ;; *) obfuscation_profile=balanced ;; esac
+			if [ "$gool_modern" -eq 1 ]; then
+				# One AETHER_NOIZE feeds both hops: the MASQUE outer hop reads
+				# firewall/gfw/light/off and the WireGuard inner hop reads
+				# balanced/aggressive/light/off, so every name is accepted.
+				procd_append_param command --gool
+				case "$obfuscation_profile" in balanced|firewall|gfw|aggressive|light|off) ;; *) obfuscation_profile=balanced ;; esac
+			else
+				if [ "$supports_v23" -eq 1 ]; then
+					procd_append_param command --gool-classic
+				else
+					procd_append_param command --gool
+				fi
+				case "$obfuscation_profile" in balanced|aggressive|light|off) ;; *) obfuscation_profile=balanced ;; esac
+			fi
 			;;
 		mim)
 			[ "$supports_v20" -eq 1 ] || {
@@ -365,10 +567,32 @@ start_service() {
 			return 1
 			;;
 	esac
-	logger -t aether "Starting Aether core v$installed_version (protocol=$protocol, config=$config_path, obfuscation=$obfuscation_profile)"
+	if [ "$protocol" = "gool" ]; then
+		if [ "$gool_modern" -eq 1 ]; then
+			logger -t aether "Starting Aether core v$installed_version (protocol=gool/modern, config=$config_path, obfuscation=$obfuscation_profile)"
+		else
+			logger -t aether "Starting Aether core v$installed_version (protocol=gool/classic, config=$config_path, obfuscation=$obfuscation_profile)"
+		fi
+	else
+		logger -t aether "Starting Aether core v$installed_version (protocol=$protocol, config=$config_path, obfuscation=$obfuscation_profile)"
+	fi
 
+	# Core v2.4 names the quiet scan "verified" (it also keeps gool/mim hops
+	# in separate ranges); "stealth" stays accepted as its alias.
 	case "$scan_mode" in
-		turbo|balanced|thorough|stealth|ironclad)
+		stealth)
+			if [ "$supports_v24" -eq 1 ]; then
+				procd_append_param command --scan verified
+			else
+				procd_append_param command --scan stealth
+			fi ;;
+		verified)
+			if [ "$supports_v24" -eq 1 ]; then
+				procd_append_param command --scan verified
+			else
+				procd_append_param command --scan stealth
+			fi ;;
+		turbo|balanced|thorough|ironclad)
 			procd_append_param command --scan "$scan_mode" ;;
 	esac
 
@@ -379,7 +603,12 @@ start_service() {
 	esac
 
 	[ -n "$obfuscation_profile" ] && procd_append_param command --noize "$obfuscation_profile"
-	if [ "$protocol" = "masque" ] || [ "$protocol" = "mim" ]; then
+	# MASQUE-side options also apply to modern gool, whose outer hop is MASQUE.
+	local masque_side=0
+	if [ "$protocol" = "masque" ] || [ "$protocol" = "mim" ] || [ "$gool_modern" -eq 1 ]; then
+		masque_side=1
+	fi
+	if [ "$masque_side" -eq 1 ]; then
 		[ "$http2_mode" = "1" ] && procd_append_param command --h2
 		[ "$supports_v20" -eq 1 ] && [ "$quic_v2" = "0" ] &&
 			procd_append_param command --no-quic-v2
@@ -387,12 +616,39 @@ start_service() {
 			procd_append_param command --ech "$ech"
 		[ -n "$h2_peer" ] && [ "$http2_mode" = "1" ] &&
 			procd_append_param command --h2-peer "$h2_peer"
-		if [ "$fragment_tls" = "1" ]; then
-			procd_append_param command --fragment
-			[ -n "$fragment_size" ] && procd_append_param command --fragment-size "$fragment_size"
-			[ -n "$fragment_delay" ] && procd_append_param command --fragment-delay "$fragment_delay"
-		fi
+		[ "$supports_v24" -eq 1 ] && [ -n "$masque_sni" ] &&
+			procd_append_param command --masque-sni "$masque_sni"
 	fi
+	# Core v2.4 also fragments the WARP API ClientHello on every transport,
+	# so --fragment is useful for wg and the classic gool too. Older cores
+	# fragment only MASQUE over HTTP/2.
+	if [ "$fragment_tls" = "1" ] && { [ "$masque_side" -eq 1 ] || [ "$supports_v24" -eq 1 ]; }; then
+		procd_append_param command --fragment
+		[ -n "$fragment_size" ] && procd_append_param command --fragment-size "$fragment_size"
+		[ -n "$fragment_delay" ] && procd_append_param command --fragment-delay "$fragment_delay"
+	fi
+	# Encrypted ClientHello resolver/domain only matter when ECH is enabled, and
+	# ECH only rides on the MASQUE handshakes (--ech above is masque_side only).
+	# Without this guard a stored ech_dns leaked onto wg/classic gool, where the
+	# core reads it while --ech itself was dropped.
+	if [ "$masque_side" -eq 1 ] && [ "$supports_v23" -eq 1 ] && [ -n "$ech" ]; then
+		[ -n "$ech_dns" ] && procd_append_param command --ech-dns "$ech_dns"
+		[ -n "$ech_domain" ] && procd_append_param command --ech-domain "$ech_domain"
+	fi
+	# WARP API reachability (core v2.4): where, and under which names, the
+	# registration calls go. Empty keeps the core's api.devices.cloudflare.com
+	# -> api.cloudflareclient.com -> edge fallback chain.
+	if [ "$supports_v24" -eq 1 ]; then
+		[ -n "$api_address" ] && procd_append_param command --api-address "$api_address"
+		[ -n "$api_host" ] && procd_append_param command --api-host "$api_host"
+		[ -n "$api_sni" ] && procd_append_param command --api-sni "$api_sni"
+		append_tls_options
+	fi
+	# Gateway certificate pinning: on by default with --team (core v2.4),
+	# "1" forces it on without a team. "0" is delivered through the
+	# environment by aether-run, never as a flag.
+	[ "$supports_v23" -eq 1 ] && [ "$tls_verify" = "1" ] &&
+		procd_append_param command --tls-verify
 	[ -n "$peer" ] && procd_append_param command --peer "$peer"
 	[ "$protocol" != "masque" ] && procd_append_param command --keepalive "$keepalive"
 	# v1.5 documents these flags for MASQUE only. v1.6+ accepts the
@@ -401,7 +657,7 @@ start_service() {
 		procd_append_param command --reconnect-secs "$reconnect_secs"
 		procd_append_param command --validate-secs "$validate_secs"
 	fi
-	if { [ "$protocol" = "masque" ] || [ "$protocol" = "mim" ]; } && [ "$supports_v16" -eq 1 ]; then
+	if [ "$masque_side" -eq 1 ] && [ "$supports_v16" -eq 1 ]; then
 		procd_append_param command --startup-secs "$startup_secs"
 	fi
 	[ "$protocol" != "masque" ] && [ "$no_profile_retry" = "1" ] &&
@@ -417,8 +673,8 @@ start_service() {
 			off|'') ;;
 			tunnel) procd_append_param command --tor ;;
 			reverse)
-				[ "$protocol" = "masque" ] || {
-					logger -t aether "ERROR: Tor reverse mode requires MASQUE"
+				[ "$reverse_ok" -eq 1 ] || {
+					logger -t aether "ERROR: Tor reverse mode requires MASQUE, MIM, or gool over MASQUE (not WireGuard or the classic gool)"
 					procd_close_instance
 					return 1
 				}
@@ -439,6 +695,71 @@ start_service() {
 				on) procd_append_param command --tor-bridges ;;
 				off) procd_append_param command --no-tor-bridges ;;
 			esac
+			if [ "$supports_v21" -eq 1 ]; then
+				case "$tor_relays" in
+					''|auto) ;;
+					only|off|[0-9]*)
+						procd_append_param command --tor-relays "$tor_relays" ;;
+				esac
+				case "$tor_relay_ports" in
+					any) procd_append_param command --tor-relay-ports any ;;
+				esac
+				[ -n "$tor_bridge_file" ] &&
+					procd_append_param command --tor-bridge-file "$tor_bridge_file"
+				[ -n "$tor_http" ] &&
+					procd_append_param command --tor-http "$tor_http"
+			fi
+		fi
+	fi
+	if [ "$supports_v21" -eq 1 ]; then
+		case "$exit_loc" in
+			''|off|auto) ;;
+			*)
+				procd_append_param command --exit-loc "$exit_loc"
+				[ -n "$exit_loc_secs" ] && [ "$exit_loc_secs" != "60" ] &&
+					procd_append_param command --exit-loc-secs "$exit_loc_secs"
+				;;
+		esac
+		[ "$stats" = "1" ] && procd_append_param command --stats
+		if [ "$stats" = "1" ] && [ -n "$stats_secs" ] && [ "$stats_secs" != "60" ]; then
+			procd_append_param command --stats-secs "$stats_secs"
+		fi
+		if [ "$tor_mode" = "only" ] && [ "$psiphon_mode" = "only" ]; then
+			logger -t aether "ERROR: tor_mode=only and psiphon_mode=only cannot both be set"
+			procd_close_instance
+			return 1
+		fi
+		case "$psiphon_mode" in
+			off|'') ;;
+			tunnel) procd_append_param command --psiphon ;;
+			reverse)
+				[ "$reverse_ok" -eq 1 ] || {
+					logger -t aether "ERROR: Psiphon reverse mode requires MASQUE, MIM, or gool over MASQUE (not WireGuard or the classic gool)"
+					procd_close_instance
+					return 1
+				}
+				procd_append_param command --psiphon-reverse ;;
+			only) procd_append_param command --psiphon-only ;;
+			*)
+				logger -t aether "ERROR: invalid Psiphon mode: $psiphon_mode"
+				procd_close_instance
+				return 1 ;;
+		esac
+		if [ "$psiphon_mode" != "off" ] && [ -n "$psiphon_mode" ]; then
+			if [ "$psiphon_mode" = "tunnel" ] || [ "$psiphon_mode" = "reverse" ]; then
+				[ -n "$psiphon_bind" ] &&
+					procd_append_param command --psiphon-bind "$psiphon_bind"
+			fi
+			[ -n "$psiphon_http" ] &&
+				procd_append_param command --psiphon-http "$psiphon_http"
+			case "$psiphon_front" in
+				cdn|direct)
+					procd_append_param command --psiphon-mode "$psiphon_front" ;;
+			esac
+			[ -n "$psiphon_region" ] &&
+				procd_append_param command --psiphon-region "$psiphon_region"
+			[ -n "$psiphon_dir" ] &&
+				procd_append_param command --psiphon-dir "$psiphon_dir"
 		fi
 	fi
 	finish_service_instances

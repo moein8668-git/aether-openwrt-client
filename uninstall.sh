@@ -17,7 +17,7 @@ for arg in "$@"; do
             exit 0
             ;;
         *)
-            error "Unknown option: $arg"
+            echo "Unknown option: $arg" >&2
             exit 1
             ;;
     esac
@@ -55,6 +55,8 @@ rm -f /usr/bin/aether
 rm -f /usr/bin/aether-ctl
 rm -f /usr/bin/aether-run
 rm -f /usr/bin/aether-watchdog
+rm -rf /usr/bin/pt
+rm -rf /usr/share/aether
 rm -f /etc/init.d/aether
 rm -f /usr/libexec/rpcd/luci-app-aether
 rm -f /usr/share/rpcd/acl.d/luci-app-aether.json

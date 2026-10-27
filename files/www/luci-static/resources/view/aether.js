@@ -12,7 +12,7 @@
 'require ui';
 'require view';
 
-var AETHER_CLIENT_VERSION = 'v0.8.0';
+var AETHER_CLIENT_VERSION = 'v0.10.0';
 
 /* Obfuscation profiles from Aether core guide — depend on protocol. */
 var AETHER_PROFILES = {
@@ -37,6 +37,15 @@ var AETHER_PROFILES = {
 		firewall: 'Firewall (recommended)',
 		gfw: 'GFW',
 		off: 'Off'
+	},
+	/* Core v2.3+ modern gool: WireGuard inside MASQUE accepts both families. */
+	'gool-modern': {
+		balanced: 'Balanced (recommended)',
+		firewall: 'Firewall',
+		gfw: 'GFW',
+		aggressive: 'Aggressive',
+		light: 'Light',
+		off: 'Off'
 	}
 };
 
@@ -45,7 +54,7 @@ function aetherProfileLabels(protocol) {
 }
 
 function aetherProfileDefault(protocol) {
-	return (protocol === 'wg' || protocol === 'gool') ? 'balanced' : 'firewall';
+	return (protocol === 'wg' || protocol === 'gool' || protocol === 'gool-modern') ? 'balanced' : 'firewall';
 }
 
 /* v1.6 introduced HTTP CONNECT, MASQUE startup deadlines, and log controls.
@@ -85,6 +94,118 @@ function aetherCoreSupportsV19(version) {
 function aetherCoreSupportsV20(version) {
 	var m = String(version || '').match(/(?:^|\s)v?(\d+)\.(\d+)\.(\d+)/);
 	return !!m && Number(m[1]) >= 2;
+}
+
+function aetherCoreSupportsV21(version) {
+	var m = String(version || '').match(/(?:^|\s)v?(\d+)\.(\d+)\.(\d+)/);
+	if (!m)
+		return false;
+	return Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 1);
+}
+
+/* v2.3 split gool into modern (WireGuard inside MASQUE, the default) and
+ * classic (WireGuard inside WireGuard). Reverse Tor/Psiphon, --gool-peer and the
+ * MASQUE options only apply to modern gool. */
+function aetherCoreSupportsV23(version) {
+	var m = String(version || '').match(/(?:^|\s)v?(\d+)\.(\d+)\.(\d+)/);
+	if (!m)
+		return false;
+	return Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 3);
+}
+
+/* v2.4 added --masque-sni, --api-*, TLS fingerprint tuning, held listeners
+ * and a fatal bad --upstream. */
+function aetherCoreSupportsV24(version) {
+	var m = String(version || '').match(/(?:^|\s)v?(\d+)\.(\d+)\.(\d+)/);
+	if (!m)
+		return false;
+	return Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 4);
+}
+
+/* Maps the stored protocol plus gool_mode to the profile/option family. */
+function aetherEffectiveProto(protocol, goolMode, supportsV23) {
+	if (protocol === 'gool' && supportsV23 && goolMode !== 'classic')
+		return 'gool-modern';
+	return protocol;
+}
+
+/* A DNS name (labels of letters, digits and hyphens separated by dots).
+ * Mirrors valid_domain() in aether-ctl, which the core's --masque-sni,
+ * --api-host, --api-sni and --ech-domain all want (never an IP literal). */
+function aetherCheckDomain(value) {
+	if (!value)
+		return true;
+	if (/^[0-9.]+$/.test(value) ||
+	    !/^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$/.test(value))
+		return 'Use a DNS name such as www.cloudflare.com';
+	if (String(value).length > 253)
+		return 'The name is longer than 253 characters';
+	return true;
+}
+
+/* ip, name, ip:port or [ipv6]:port. Mirrors valid_api_address() in aether-ctl:
+ * a bare IPv6 literal without brackets is refused. */
+function aetherCheckApiAddress(value) {
+	var v = String(value == null ? '' : value).trim(), m;
+
+	if (!v)
+		return 'Use ip, name, ip:port or [ipv6]:port';
+
+	if (v.charAt(0) === '[') {
+		m = v.match(/^\[[0-9A-Fa-f:.]+\](?::([0-9]{1,5}))?$/);
+		if (!m)
+			return 'Use [ipv6] or [ipv6]:port';
+	}
+	else {
+		if ((v.match(/:/g) || []).length > 1)
+			return 'An IPv6 address must be in brackets: [2606:4700::1]:443';
+		m = v.match(/^[A-Za-z0-9][A-Za-z0-9.-]*(?::([0-9]{1,5}))?$/);
+		if (!m)
+			return 'Use a name, an IPv4 address, or host:port';
+	}
+
+	if (m[1] != null && (Number(m[1]) < 1 || Number(m[1]) > 65535))
+		return 'The port must be 1-65535';
+
+	return true;
+}
+
+/* Core v2.4 parses TLS value lists itself and exits on anything it cannot take:
+ * names are separated by ':' only (a comma is fatal), with one alphabet per
+ * kind. Mirrors valid_tls_list() in aether-ctl. */
+function aetherCheckTlsList(value, kind) {
+	var items = String(value).split(':'), i, item;
+
+	for (i = 0; i < items.length; i++) {
+		item = items[i];
+
+		if (!item)
+			return 'No empty entry: separate names with ":"';
+
+		if (kind === 'ciphers') {
+			if (!/^[!+-]?[A-Za-z0-9_.+-]+$/.test(item))
+				return 'Invalid cipher name "' + item + '"';
+		}
+		else if (kind === 'compression') {
+			if (!/^(zlib|brotli|zstd)$/.test(item))
+				return 'Use zlib, brotli or zstd, separated by ":"';
+		}
+		else if (kind === 'trustanchors') {
+			if (!/^[0-9]+(\.[0-9]+)*$/.test(item))
+				return 'Use dotted OIDs such as 11129.9.1, separated by ":"';
+		}
+		else if (!/^[A-Za-z0-9_.+-]+$/.test(item)) {
+			return 'Invalid TLS name "' + item + '"';
+		}
+	}
+
+	return true;
+}
+
+function aetherCheckTlsPadding(value) {
+	if (!/^[0-9]+$/.test(String(value)) || Number(value) > 65535)
+		return 'Use a whole number of bytes from 0 to 65535';
+	return true;
 }
 
 function aetherSyncProfileChoices(profileOpt, section_id, protocol) {
@@ -166,7 +287,7 @@ function aetherSetOptionDisabled(opt, section_id, disabled) {
 }
 
 function aetherSyncMasqueOptions(options, section_id, protocol) {
-	var disabled = (protocol !== 'masque' && protocol !== 'mim');
+	var disabled = (protocol !== 'masque' && protocol !== 'mim' && protocol !== 'gool-modern');
 	options.forEach(function(opt) {
 		aetherSetOptionDisabled(opt, section_id, disabled);
 	});
@@ -206,6 +327,19 @@ function extractFromLogs(logs, pattern) {
 	return m ? m[1] : '';
 }
 
+/* Like extractFromLogs but returns the last match. Modern gool opens an
+ * internal helper SOCKS5 listener (random port) before the real one, so the
+ * newest 'listening on' line is the one that reflects the configured address. */
+function extractLastFromLogs(logs, pattern) {
+	var re, flags, m, last = '';
+	if (!logs) return '';
+	flags = 'g' + (pattern.ignoreCase ? 'i' : '');
+	re = new RegExp(pattern.source, flags);
+	while ((m = re.exec(logs)) !== null)
+		last = m[1];
+	return last;
+}
+
 function getServiceStatus() {
 	return Promise.all([
 		callServiceList('aether').then(function(res) {
@@ -234,7 +368,10 @@ function getServiceStatus() {
 		callUCIGet('aether', 'main', 'tor_mode').then(function(r) {
 			return (r && r.value) ? String(r.value).replace(/'/g, '') : 'off';
 		}).catch(function() { return 'off'; }),
-		callFileExec('logread', [ '-e', 'aether', '-l', '30' ]).then(function(r) {
+		// Read enough of the log to cover a full startup: a gool/MASQUE scan
+		// writes ~40-200 lines between "Starting Aether core" and the
+		// "socks5 server listening" marker, and the old 30-line window hid it.
+		callFileExec('logread', [ '-e', 'aether', '-l', '250' ]).then(function(r) {
 			return (r && r.stdout) ? r.stdout : '';
 		}).catch(function() { return ''; }),
 		callFileExec('/usr/bin/aether', [ '--version' ]).then(function(r) {
@@ -242,7 +379,19 @@ function getServiceStatus() {
 		}).catch(function() { return ''; }),
 		callUCIGet('aether', 'main', 'tor_bind').then(function(r) {
 			return (r && r.value) ? String(r.value).replace(/'/g, '') : '127.0.0.1:1820';
-		}).catch(function() { return '127.0.0.1:1820'; })
+		}).catch(function() { return '127.0.0.1:1820'; }),
+		callUCIGet('aether', 'main', 'psiphon_mode').then(function(r) {
+			return (r && r.value) ? String(r.value).replace(/'/g, '') : 'off';
+		}).catch(function() { return 'off'; }),
+		callUCIGet('aether', 'main', 'psiphon_bind').then(function(r) {
+			return (r && r.value) ? String(r.value).replace(/'/g, '') : '127.0.0.1:1821';
+		}).catch(function() { return '127.0.0.1:1821'; }),
+		callUCIGet('aether', 'main', 'exit_loc').then(function(r) {
+			return (r && r.value != null) ? String(r.value).replace(/'/g, '') : '';
+		}).catch(function() { return ''; }),
+		callUCIGet('aether', 'main', 'gool_mode').then(function(r) {
+			return (r && r.value) ? String(r.value).replace(/'/g, '') : 'modern';
+		}).catch(function() { return 'modern'; })
 	]).then(function(r) {
 		var svc = r[0], logs = r[4], version = r[5];
 		return {
@@ -254,12 +403,17 @@ function getServiceStatus() {
 			version: version.replace(/^aether\s+/i, ''),
 			torMode: r[3],
 			torBind: r[6],
+			psiphonMode: r[7],
+			psiphonBind: r[8],
+			exitLoc: r[9],
+			goolMode: r[10],
 			endpoint: extractFromLogs(logs, /using cloudflare edge ([0-9.:]+)/),
 			transport: extractFromLogs(logs, /MASQUE transport: ([^\s]+)/),
-			socks_addr: extractFromLogs(logs, /socks5 (?:server )?listening on ([^\s]+)/),
+			socks_addr: extractLastFromLogs(logs, /socks5 (?:server )?listening on ([^\s]+)/),
 			obfuscation: extractFromLogs(logs, /obfuscation profile: (\w+)/),
 			scan_mode: extractFromLogs(logs, /scan mode: (\w+)/),
 			identity: extractFromLogs(logs, /device=([^\s]+)/),
+			exit: extractFromLogs(logs, /exit:\s+([^\r\n]+)/),
 			logs: logs
 		};
 	});
@@ -431,6 +585,59 @@ function doCheckTor() {
 	};
 }
 
+function doCheckPsiphon() {
+	return function() {
+		var btn = this;
+		var resultEl = document.getElementById('test-result-psiphon');
+		btn.disabled = true;
+		btn.value = 'Checking...';
+		if (resultEl) {
+			resultEl.textContent = 'Connecting...';
+			resultEl.style.color = '#888';
+		}
+
+		callFileExec('/usr/bin/aether-ctl', [ 'check-psiphon' ]
+		).then(function(r) {
+			var output = (r && r.stdout) ? r.stdout : '';
+			var errput = (r && r.stderr) ? r.stderr : '';
+			var combined = output + ' ' + errput;
+			var ipCountryMatch = combined.match(/Psiphon:\s*IP:\s*([^\s(]+)\s*\(([^)]+)\)\s+(\d+)ms/i);
+			var ipMatch = combined.match(/Psiphon:\s*IP:\s*([^\s(]+)\s+(\d+)ms/i);
+			var failMatch = combined.match(/FAILED\s+(\d+)ms/i);
+
+			if (ipCountryMatch) {
+				if (resultEl) {
+					resultEl.textContent = ipCountryMatch[1] + ' (' + ipCountryMatch[2] + ') \u2014 ' + ipCountryMatch[3] + 'ms';
+					resultEl.style.color = '#2ecc71';
+				}
+			} else if (ipMatch) {
+				if (resultEl) {
+					resultEl.textContent = ipMatch[1] + ' \u2014 ' + ipMatch[2] + 'ms';
+					resultEl.style.color = '#2ecc71';
+				}
+			} else if (failMatch) {
+				if (resultEl) {
+					resultEl.textContent = 'Failed \u2014 ' + failMatch[1] + 'ms';
+					resultEl.style.color = '#e74c3c';
+				}
+			} else {
+				if (resultEl) {
+					resultEl.textContent = 'Failed';
+					resultEl.style.color = '#e74c3c';
+				}
+			}
+		}).catch(function() {
+			if (resultEl) {
+				resultEl.textContent = 'Error';
+				resultEl.style.color = '#e74c3c';
+			}
+		}).finally(function() {
+			btn.disabled = false;
+			btn.value = 'Check Psiphon IP';
+		});
+	};
+}
+
 /* Parse "key=value" lines emitted by `aether-ctl passwall status`. */
 function parseKeyValues(text) {
 	var out = {};
@@ -480,6 +687,9 @@ return view.extend({
 			var supportsV18 = aetherCoreSupportsV18(st.version);
 			var supportsV19 = aetherCoreSupportsV19(st.version);
 			var supportsV20 = aetherCoreSupportsV20(st.version);
+			var supportsV21 = aetherCoreSupportsV21(st.version);
+			var supportsV23 = aetherCoreSupportsV23(st.version);
+			var supportsV24 = aetherCoreSupportsV24(st.version);
 			var tbl = E('table', { 'class': 'table' });
 
 			function row(label, val) {
@@ -502,9 +712,15 @@ return view.extend({
 				if (st.pid) row('PID', String(st.pid));
 				if (st.endpoint) row('Endpoint', E('code', {}, st.endpoint));
 				if (st.transport) row('Transport', 'MASQUE / ' + st.transport);
+				if (st.protocol === 'gool' && supportsV23)
+					row('gool Flavor', st.goolMode === 'classic' ? 'Classic (WireGuard inside WireGuard)' : 'Modern (WireGuard inside MASQUE)');
 				if (st.obfuscation) row('Obfuscation', st.obfuscation);
 				if (st.scan_mode) row('Scan Mode', st.scan_mode);
-				if (st.socks_addr) row('SOCKS5 Proxy', E('code', {}, st.socks_addr));
+				if (st.socks_addr)
+					row('SOCKS5 Proxy', E('code', {}, st.socks_addr));
+				else if (st.running)
+					row('SOCKS5 Proxy', 'opening (waiting for tunnel validation)');
+				if (st.exit) row('Exit', st.exit);
 				if (st.identity) {
 					row('Device ID', E('code', {
 						'style': 'font-size:11px;word-break:break-all'
@@ -525,6 +741,21 @@ return view.extend({
 				}
 			} else {
 				row('Tor', 'Needs core v2.0+');
+			}
+
+			if (supportsV21) {
+				if (!st.psiphonMode || st.psiphonMode === 'off') {
+					row('Psiphon', 'Disabled');
+				} else if (st.psiphonMode === 'only') {
+					row('Psiphon', 'Enabled (Psiphon only, no WARP tunnel)');
+				} else {
+					var psiAddr = String(st.psiphonBind || '127.0.0.1:1821').replace(/0\.0\.0\.0/, '127.0.0.1');
+					row('Psiphon', E('span', {}, ['Enabled at ', E('code', {}, psiAddr)]));
+				}
+				if (st.exitLoc && st.exitLoc !== 'off' && st.exitLoc !== 'auto')
+					row('Exit Policy', st.exitLoc);
+			} else {
+				row('Psiphon', 'Needs core v2.1+');
 			}
 
 			var btns = E('div', {
@@ -636,6 +867,28 @@ return view.extend({
 				torWrapper.appendChild(torBtn);
 				torWrapper.appendChild(torResult);
 				testRow.appendChild(torWrapper);
+			}
+
+			if (supportsV21 && (st.psiphonMode === 'tunnel' || st.psiphonMode === 'reverse' || st.psiphonMode === 'only')) {
+				var psiWrapper = E('div', {
+					'style': 'display:flex;align-items:center;gap:6px'
+				});
+
+				var psiBtn = E('input', {
+					'type': 'button',
+					'class': 'cbi-button cbi-button-apply',
+					'value': 'Check Psiphon IP',
+					'click': doCheckPsiphon()
+				});
+
+				var psiResult = E('span', {
+					'id': 'test-result-psiphon',
+					'style': 'font-size:13px;color:#888;min-width:140px'
+				}, '');
+
+				psiWrapper.appendChild(psiBtn);
+				psiWrapper.appendChild(psiResult);
+				testRow.appendChild(psiWrapper);
 			}
 
 			testSection.appendChild(testRow);
@@ -806,12 +1059,48 @@ return view.extend({
 			o = s.option(form.ListValue, 'protocol', 'Protocol');
 			o.value('masque', 'MASQUE (recommended)');
 			o.value('wg', 'WireGuard');
-			o.value('gool', 'WARP-in-WARP');
+			o.value('gool', 'WARP-in-WARP (gool)');
 			if (supportsV20)
 				o.value('mim', 'MASQUE-in-MASQUE');
 			o.default = 'masque';
 			var protocolOpt = o;
 			var masqueOptionOpts = [];
+			var goolModeOpt = null;
+
+			/* Effective profile/option family for the values currently on screen. */
+			function currentEffectiveProto(section_id) {
+				var proto = 'masque', mode = 'modern';
+				try {
+					proto = protocolOpt.formvalue(section_id) || protocolOpt.cfgvalue(section_id) || 'masque';
+				}
+				catch (e) {
+					proto = uci.get('aether', section_id, 'protocol') || 'masque';
+				}
+				try {
+					if (goolModeOpt)
+						mode = goolModeOpt.formvalue(section_id) || goolModeOpt.cfgvalue(section_id) || 'modern';
+				}
+				catch (e) {
+					mode = uci.get('aether', section_id, 'gool_mode') || 'modern';
+				}
+				return aetherEffectiveProto(proto, mode, supportsV23);
+			}
+
+			if (supportsV23) {
+				o = s.option(form.ListValue, 'gool_mode', 'gool Flavor',
+					'Modern gool (default since core v2.3) runs WireGuard inside a MASQUE tunnel and supports the MASQUE options and reverse Tor/Psiphon. Classic gool is the older WireGuard-inside-WireGuard transport and uses the dual-hop settings below.');
+				o.value('modern', 'Modern (WireGuard inside MASQUE)');
+				o.value('classic', 'Classic (WireGuard inside WireGuard)');
+				o.default = 'modern';
+				o.depends('protocol', 'gool');
+				goolModeOpt = o;
+
+				o = s.option(form.Value, 'gool_peer', 'gool MASQUE Hop',
+					'Optional ip:port of the WireGuard endpoint modern gool dials inside the tunnel. Leave empty to auto-select.');
+				o.datatype = 'ipaddrport(1)';
+				o.rmempty = true;
+				o.depends({ protocol: 'gool', gool_mode: 'modern' });
+			}
 
 			o = s.option(form.Value, 'socks_listen', 'SOCKS5 Listen Address');
 			o.default = '0.0.0.0:1819';
@@ -830,9 +1119,21 @@ return view.extend({
 					'Dial out through another proxy before reaching Cloudflare ' +
 					'(requires core v1.7+). Accepts socks5://[user:pass@]host:port, ' +
 					'http://host:port or bare host:port. A SOCKS5 upstream carries all ' +
-					'transports; an HTTP CONNECT upstream requires HTTP/2 mode.');
+					'transports; an HTTP CONNECT upstream requires HTTP/2 mode.' +
+					(supportsV24 ? ' Core v2.4 exits when the upstream cannot be dialled, so an invalid value is rejected here.' : ''));
 				o.rmempty = true;
 				o.password = true;
+				o.validate = function(section_id, value) {
+					var m;
+					if (!value)
+						return true;
+					m = String(value).match(/^(?:(socks5h?|http|https):\/\/)?(?:[^@\/]*@)?(\[[0-9A-Fa-f:.]+\]|[^:\/\[\]@\s]+):(\d{1,5})(?:\/.*)?$/);
+					if (!m || Number(m[3]) < 1 || Number(m[3]) > 65535)
+						return 'Use [socks5|socks5h|http://][user:pass@]host:port';
+					if (m[1] === 'https' && /@/.test(String(value)))
+						return 'An https upstream cannot carry credentials';
+					return true;
+				};
 			}
 
 			if (!supportsV16) {
@@ -842,9 +1143,21 @@ return view.extend({
 				el.appendChild(E('div', { 'class': 'alert-message warning' },
 					'Aether v1.6 compatibility mode: upstream proxy chaining requires core v1.7.0 or newer.'));
 			}
-			if (supportsV20) {
+			if (supportsV20 && !supportsV21) {
 				el.appendChild(E('div', { 'class': 'alert-message notice' },
 					'Aether Core v2.0.0 compatibility mode: MASQUE-in-MASQUE, QUIC v2 controls, and Tor are available.'));
+			}
+			if (supportsV21 && !supportsV23) {
+				el.appendChild(E('div', { 'class': 'alert-message notice' },
+					'Aether Core v2.1.0 compatibility mode: exit-country filtering, Psiphon, Tor relays/HTTP, and stats logging are available. Core v2.3 adds modern gool and register; v2.4 adds SNI, API and TLS controls.'));
+			}
+			if (supportsV23 && !supportsV24) {
+				el.appendChild(E('div', { 'class': 'alert-message notice' },
+					'Aether Core v2.3 compatibility mode: modern gool (WireGuard inside MASQUE), reverse Tor/Psiphon over modern gool, ECH resolver and certificate-pinning controls are available. MASQUE SNI, WARP API and TLS fingerprint options need core v2.4.'));
+			}
+			if (supportsV24) {
+				el.appendChild(E('div', { 'class': 'alert-message notice' },
+					'Aether Core v2.4 compatibility mode: MASQUE SNI, WARP API reachability, TLS fingerprint tuning, the verified scan and strict upstream checking are available. Listeners open at start and queue clients until the tunnel validates, so an open SOCKS port no longer proves the tunnel is up.'));
 			}
 			if (!supportsV18) {
 				el.appendChild(E('div', { 'class': 'alert-message warning' },
@@ -857,10 +1170,12 @@ return view.extend({
 			s = m.section(form.NamedSection, 'main', 'aether', 'Network');
 
 			o = s.option(form.ListValue, 'scan_mode', 'Scan Mode',
-				'turbo=fastest, balanced=default, thorough=best quality, stealth=quietest, ironclad=real tunnel test');
+				'turbo=fastest, balanced=default, thorough=best quality, verified=quietest scan (core v2.4; stealth is its older name), ironclad=real tunnel test');
 			o.value('turbo', 'Turbo');
 			o.value('balanced', 'Balanced (default)');
 			o.value('thorough', 'Thorough');
+			if (supportsV24)
+				o.value('verified', 'Verified (quiet, v2.4)');
 			o.value('stealth', 'Stealth');
 			o.value('ironclad', 'Ironclad (real tunnel test)');
 			o.default = 'balanced';
@@ -875,10 +1190,43 @@ return view.extend({
 				'ip:port, or leave empty for auto-scan');
 			o.rmempty = true;
 
+			if (supportsV21) {
+				o = s.option(form.Value, 'exit_loc', 'Exit Location Policy',
+					'Refuse a finished tunnel whose Cloudflare loc is unwanted before SOCKS opens, and recheck every minute. !IR,AZ,RU blocks those countries; DE,SE allows only those. off disables the check (empty is stored as off).');
+				o.placeholder = '!IR';
+				o.rmempty = true;
+				o.validate = function(section_id, value) {
+					var v = String(value == null ? '' : value).replace(/\s+/g, '').toUpperCase();
+
+					if (v === '' || v === 'OFF' || v === 'AUTO')
+						return true;
+
+					var body = v.replace(/^[!=]+/, '');
+
+					if (!body)
+						return 'Use !IR,AZ,RU (deny) or DE,SE (allow), or off';
+
+					var toks = body.split(','), i;
+
+					for (i = 0; i < toks.length; i++) {
+						if (toks[i] !== '' && !/^[A-Z]{2}$/.test(toks[i]))
+							return 'Invalid country code "' + toks[i] + '": use two letters, e.g. !IR,AZ';
+					}
+
+					return true;
+				};
+
+				o = s.option(form.Value, 'exit_loc_secs', 'Exit Recheck Interval (s)',
+					'How often to re-read the exit country after SOCKS is open (default 60).');
+				o.default = '60';
+				o.datatype = 'min(1)';
+				o.rmempty = true;
+			}
+
 			s = m.section(form.NamedSection, 'main', 'aether', 'Obfuscation');
 
 			o = s.option(form.ListValue, 'obfuscation_profile', 'Profile',
-				'Choices change with Protocol (MASQUE vs WireGuard/gool)');
+				'Choices change with Protocol (MASQUE vs WireGuard/gool). Core v2.1.0 implements firewall and gfw for real; earlier cores fell through to balanced.');
 			o.rmempty = false;
 			o.value('firewall', 'Firewall (recommended)');
 			o.value('gfw', 'GFW');
@@ -889,7 +1237,8 @@ return view.extend({
 			o.default = 'firewall';
 			var profileOpt = o;
 			o.cfgvalue = function(section_id) {
-				var proto = uci.get('aether', section_id, 'protocol') || 'masque';
+				var proto = aetherEffectiveProto(uci.get('aether', section_id, 'protocol') || 'masque',
+					uci.get('aether', section_id, 'gool_mode') || 'modern', supportsV23);
 				var v = uci.get('aether', section_id, 'obfuscation_profile');
 				var labels = aetherProfileLabels(proto);
 				if (!v || !labels.hasOwnProperty(v))
@@ -897,13 +1246,7 @@ return view.extend({
 				return v;
 			};
 			o.renderWidget = function(section_id, option_index, cfgvalue) {
-				var proto = 'masque';
-				try {
-					proto = protocolOpt.formvalue(section_id) || protocolOpt.cfgvalue(section_id) || 'masque';
-				}
-				catch (e) {
-					proto = uci.get('aether', section_id, 'protocol') || 'masque';
-				}
+				var proto = currentEffectiveProto(section_id);
 				var labels = aetherProfileLabels(proto);
 				var keys = Object.keys(labels);
 				this.keylist = keys.slice();
@@ -921,10 +1264,17 @@ return view.extend({
 			};
 
 			protocolOpt.onchange = function(ev, section_id, value) {
-				var proto = value || 'masque';
+				var proto = currentEffectiveProto(section_id);
 				aetherSyncProfileChoices(profileOpt, section_id, proto);
 				aetherSyncMasqueOptions(masqueOptionOpts, section_id, proto);
 			};
+			if (goolModeOpt) {
+				goolModeOpt.onchange = function(ev, section_id, value) {
+					var proto = currentEffectiveProto(section_id);
+					aetherSyncProfileChoices(profileOpt, section_id, proto);
+					aetherSyncMasqueOptions(masqueOptionOpts, section_id, proto);
+				};
+			}
 
 			s = m.section(form.NamedSection, 'main', 'aether', 'Zero Trust',
 				'Optional Cloudflare Zero Trust enrollment using a headless service token.');
@@ -981,18 +1331,117 @@ return view.extend({
 			o.rmempty = true;
 			masqueOptionOpts.push(o);
 
+			if (supportsV23) {
+				o = s.option(form.Value, 'ech_dns', 'ECH Resolver',
+					'Resolver used to fetch the ECH configuration, as a URL: udp://1.1.1.1:53, tcp://1.1.1.1:53 or https://1.1.1.1/dns-query. A bare IP makes the core stop. Only used when ECH is set; leave empty for the core default.');
+				o.rmempty = true;
+				o.validate = function(section_id, value) {
+					if (!value)
+						return true;
+					return /^(udp|tcp|https):\/\/\S+$/.test(value) ? true : 'Use udp://host[:port], tcp://host[:port] or https://host/path';
+				};
+				masqueOptionOpts.push(o);
+
+				o = s.option(form.Value, 'ech_domain', 'ECH Domain',
+					'Domain whose ECH configuration is looked up. Leave empty for the core default.');
+				o.rmempty = true;
+				o.validate = function(section_id, value) { return aetherCheckDomain(value); };
+				masqueOptionOpts.push(o);
+			}
+
+			if (supportsV24) {
+				o = s.option(form.Value, 'masque_sni', 'MASQUE SNI',
+					'TLS server name sent to the MASQUE gateway (core default www.cloudflare.com). Must be a DNS name, not an IP address.');
+				o.rmempty = true;
+				o.validate = function(section_id, value) { return aetherCheckDomain(value); };
+				masqueOptionOpts.push(o);
+			}
+
 			o = s.option(form.Flag, 'fragment_tls', 'TLS Fragmentation',
-				'Fragment ClientHello (HTTP/2 only)');
+				supportsV24 ? 'Fragment the ClientHello. Core v2.4 also fragments the WARP API calls on every transport. Shown here for MASQUE; it also applies to WireGuard and classic gool on v2.4.' :
+					'Fragment ClientHello (HTTP/2 only)');
 			o.default = '0';
 			masqueOptionOpts.push(o);
 
-			o = s.option(form.Value, 'fragment_size', 'Fragment Size');
-			o.default = '16-32';
+			o = s.option(form.Value, 'fragment_size', 'Fragment Size',
+				'Bytes per fragment (core default 8-16).');
+			o.default = '8-16';
 			masqueOptionOpts.push(o);
 
 			o = s.option(form.Value, 'fragment_delay', 'Fragment Delay (ms)');
 			o.default = '2-10';
 			masqueOptionOpts.push(o);
+
+			if (supportsV23) {
+				s = m.section(form.NamedSection, 'main', 'aether', 'Security');
+				o = s.option(form.ListValue, 'tls_verify', 'Gateway Certificate Pinning',
+					'Core v2.4 pins the gateway certificate by default when a Zero Trust team is set. Disable only to debug a TLS-intercepting network; it is passed to the core through the environment, never as a flag.');
+				o.value('', 'Core default');
+				o.value('1', 'Always verify');
+				o.value('0', 'Disable verification');
+				o.default = '';
+				o.rmempty = true;
+			}
+
+			if (supportsV24) {
+				s = m.section(form.NamedSection, 'main', 'aether', 'WARP API and TLS (Core v2.4)',
+					'Where registration calls go and how the TLS ClientHello looks. Leave everything empty to keep the core defaults. Core v2.4 exits on a value it cannot parse, so each field is checked here before it is saved.');
+				o = s.option(form.Value, 'api_address', 'API Address',
+					'ip, name, ip:port or [ipv6]:port to reach the WARP API through instead of the default fallback chain.');
+				o.rmempty = true;
+				o.validate = function(section_id, value) {
+					if (!value)
+						return true;
+					return aetherCheckApiAddress(value);
+				};
+				o = s.option(form.Value, 'api_host', 'API Host Header', 'Overrides the HTTP Host header of API calls.');
+				o.rmempty = true;
+				o.validate = function(section_id, value) { return aetherCheckDomain(value); };
+				o = s.option(form.Value, 'api_sni', 'API SNI', 'Overrides the TLS server name of API calls.');
+				o.rmempty = true;
+				o.validate = function(section_id, value) { return aetherCheckDomain(value); };
+
+				[ ['tls_ciphers', 'TLS Ciphers', 'ciphers', 'BoringSSL cipher names separated by ":", e.g. ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256'],
+				  ['tls13_ciphers', 'TLS 1.3 Ciphers', 'ciphers', 'TLS 1.3 suite names separated by ":", e.g. TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256'],
+				  ['tls_groups', 'TLS Groups', 'groups', 'TLS groups in order, separated by ":", e.g. P-256:X25519:P-384'],
+				  ['tls_key_shares', 'TLS Key Shares', 'groups', 'Groups that get a key share, separated by ":" (each one must be in TLS Groups)'],
+				  ['tls_sigalgs', 'TLS Signature Algorithms', 'sigalgs', 'BoringSSL signature algorithm names separated by ":", e.g. ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256'],
+				  ['tls_cert_compression', 'TLS Certificate Compression', 'compression', 'zlib, brotli and/or zstd separated by ":", e.g. brotli:zlib'],
+				  ['tls_trust_anchors', 'TLS Trust Anchors', 'trustanchors', 'Trust anchor IDs in dotted decimal, separated by ":", e.g. 11129.9.1:11129.9.4'] ].forEach(function(p) {
+					var opt = s.option(form.Value, p[0], p[1], p[3] + '. Empty keeps the core default.');
+					opt.rmempty = true;
+					opt.validate = function(section_id, value) {
+						if (!value)
+							return true;
+						return aetherCheckTlsList(value, p[2]);
+					};
+				});
+
+				o = s.option(form.ListValue, 'tls_alps', 'TLS ALPS',
+					'Offer ALPS for h2 and h3 under the codepoint Chrome sends now (new) or sent before (old).');
+				o.value('', 'Core default (none)');
+				o.value('new', 'New (0x44cd)');
+				o.value('old', 'Old (0x4469, Chrome 120)');
+				o.default = '';
+				o.rmempty = true;
+
+				o = s.option(form.Value, 'tls_server_padding', 'TLS Server Padding',
+					'Bytes of padding asked of the server, 0-65535 (Chrome asks 6000). Empty keeps the core default.');
+				o.rmempty = true;
+				o.validate = function(section_id, value) {
+					if (!value)
+						return true;
+					return aetherCheckTlsPadding(value);
+				};
+
+				[ ['disable_grease', 'Disable GREASE'], ['enable_grease_sigalgs', 'Enable GREASE Signature Algorithms'],
+				  ['enable_ech_grease', 'Enable ECH GREASE'], ['disable_ocsp_stapling', 'Disable OCSP Stapling'],
+				  ['disable_sct', 'Disable SCT'], ['disable_session_ticket', 'Disable Session Tickets'],
+				  ['disable_extension_permutation', 'Disable Extension Permutation'] ].forEach(function(p) {
+					var opt = s.option(form.Flag, p[0], p[1]);
+					opt.default = '0';
+				});
+			}
 
 			s = m.section(form.NamedSection, 'main', 'aether', 'Advanced');
 
@@ -1033,6 +1482,8 @@ return view.extend({
 				o.datatype = 'min(1)';
 				o.depends('protocol', 'masque');
 				o.depends('protocol', 'mim');
+				if (supportsV23)
+					o.depends({ protocol: 'gool', gool_mode: 'modern' });
 			}
 
 			o = s.option(form.Flag, 'quick_reconnect', 'Quick Reconnect',
@@ -1067,6 +1518,18 @@ return view.extend({
 			o.datatype = 'range(2,10)';
 			o.depends('watchdog_enabled', '1');
 
+			if (supportsV21) {
+				o = s.option(form.Flag, 'stats', 'Log Traffic Stats',
+					'Write bytes up/down and uptime to syslog (logread -e aether). Off by default.');
+				o.default = '0';
+
+				o = s.option(form.Value, 'stats_secs', 'Stats Interval (s)',
+					'How often to log the stats line (default 60).');
+				o.default = '60';
+				o.datatype = 'min(1)';
+				o.depends('stats', '1');
+			}
+
 			if (supportsV18) {
 				o = s.option(form.ListValue, 'perf_profile', 'Performance Profile',
 					'Core resource profile.');
@@ -1079,16 +1542,22 @@ return view.extend({
 
 			if (supportsV19) {
 				o = s.option(form.Value, 'wiw_outer', 'gool Outer Hop',
-					'Outer WARP-in-WARP endpoint (ip:port), the one your network sees. Leave empty to auto-scan.');
+					'Outer WARP-in-WARP endpoint (ip:port), the one your network sees. Classic gool only; leave empty to auto-scan.');
 				o.datatype = 'ipaddrport(1)';
 				o.rmempty = true;
-				o.depends('protocol', 'gool');
+				if (supportsV23)
+					o.depends({ protocol: 'gool', gool_mode: 'classic' });
+				else
+					o.depends('protocol', 'gool');
 
 				o = s.option(form.Value, 'wiw_inner', 'gool Inner Hop',
-					'Inner WARP-in-WARP endpoint (ip:port). Leave empty to auto-scan.');
+					'Inner WARP-in-WARP endpoint (ip:port). Classic gool only; leave empty to auto-scan.');
 				o.datatype = 'ipaddrport(1)';
 				o.rmempty = true;
-				o.depends('protocol', 'gool');
+				if (supportsV23)
+					o.depends({ protocol: 'gool', gool_mode: 'classic' });
+				else
+					o.depends('protocol', 'gool');
 			}
 
 			if (supportsV20) {
@@ -1113,7 +1582,7 @@ return view.extend({
 				o = s.option(form.ListValue, 'tor_mode', 'Tor Mode');
 				o.value('off', 'Off');
 				o.value('tunnel', 'Tor through WARP');
-				o.value('reverse', 'WARP through Tor (MASQUE only)');
+				o.value('reverse', supportsV23 ? 'WARP through Tor (MASQUE or modern gool)' : 'WARP through Tor (MASQUE only)');
 				o.value('only', 'Tor only (no WARP tunnel)');
 				o.default = 'off';
 
@@ -1133,6 +1602,72 @@ return view.extend({
 				o.value('off', 'Never use bridges');
 				o.default = 'auto';
 				o.depends('tor_mode', /^(tunnel|reverse|only)$/);
+
+				if (supportsV21) {
+					o = s.option(form.ListValue, 'tor_relays', 'Onionoo Relays as Bridges',
+						'Core v2.1 fetches bridgedb through the WARP tunnel when Tor rides inside it. Onionoo lists thousands of running relays as a second pool.');
+					o.value('auto', 'Automatic (alongside bridgedb)');
+					o.value('only', 'Onionoo relays only');
+					o.value('off', 'Do not use onionoo relays');
+					o.default = 'auto';
+					o.depends('tor_mode', /^(tunnel|reverse|only)$/);
+
+					o = s.option(form.ListValue, 'tor_relay_ports', 'Relay Ports');
+					o.value('web', '80 and 443 only (default)');
+					o.value('any', 'Any port except Tor defaults');
+					o.default = 'web';
+					o.depends('tor_mode', /^(tunnel|reverse|only)$/);
+
+					o = s.option(form.Value, 'tor_bridge_file', 'Bridge File',
+						'Absolute path to torrc-style bridge lines. Leave empty to skip.');
+					o.rmempty = true;
+					o.depends('tor_mode', /^(tunnel|reverse|only)$/);
+
+					o = s.option(form.Value, 'tor_http', 'Tor HTTP CONNECT',
+						'Optional ip:port for an HTTP CONNECT listener on the Tor exit. Leave empty to disable.');
+					o.datatype = 'ipaddrport';
+					o.rmempty = true;
+					o.depends('tor_mode', /^(tunnel|reverse|only)$/);
+				}
+			}
+
+			if (supportsV21) {
+				s = m.section(form.NamedSection, 'main', 'aether', 'Psiphon (Core v2.1)');
+				o = s.option(form.ListValue, 'psiphon_mode', 'Psiphon Mode',
+					'Needs the psiphon-tunnel-core binary in /usr/bin/pt (installed from the core archive). Reverse forces MASQUE HTTP/2.');
+				o.value('off', 'Off');
+				o.value('tunnel', 'Psiphon through WARP');
+				o.value('reverse', supportsV23 ? 'WARP through Psiphon (MASQUE or modern gool)' : 'WARP through Psiphon (MASQUE only)');
+				o.value('only', 'Psiphon only (no WARP tunnel)');
+				o.default = 'off';
+
+				o = s.option(form.Value, 'psiphon_bind', 'Psiphon SOCKS5 Listen Address');
+				o.default = '127.0.0.1:1821';
+				o.datatype = 'ipaddrport';
+				o.depends('psiphon_mode', 'tunnel');
+				o.depends('psiphon_mode', 'reverse');
+
+				o = s.option(form.Value, 'psiphon_http', 'Psiphon HTTP CONNECT',
+					'Optional ip:port for an HTTP CONNECT listener on the Psiphon exit.');
+				o.datatype = 'ipaddrport';
+				o.rmempty = true;
+				o.depends('psiphon_mode', /^(tunnel|reverse|only)$/);
+
+				o = s.option(form.ListValue, 'psiphon_front', 'Psiphon Fronting');
+				o.value('auto', 'Auto (let Psiphon pick)');
+				o.value('cdn', 'CDN meek fronting only');
+				o.value('direct', 'Direct, no fronting');
+				o.default = 'auto';
+				o.depends('psiphon_mode', /^(tunnel|reverse|only)$/);
+
+				o = s.option(form.Value, 'psiphon_region', 'Psiphon Exit Country',
+					'Two-letter code such as DE. Leave empty for any exit.');
+				o.rmempty = true;
+				o.depends('psiphon_mode', /^(tunnel|reverse|only)$/);
+
+				o = s.option(form.Value, 'psiphon_dir', 'Psiphon State Directory');
+				o.rmempty = true;
+				o.depends('psiphon_mode', /^(tunnel|reverse|only)$/);
 			}
 			s = m.section(form.NamedSection, 'main', 'aether', 'Custom Command',
 				'Take full control of the core command line. Generated mode shows the running command read-only; switch to Manual to type your own arguments (space-separated, no quotes). Manual commands still launch through aether-run, so Zero Trust secrets stay out of process listings. Applies on restart.');
@@ -1153,13 +1688,7 @@ return view.extend({
 
 			return m.render().then(function(formNode) {
 				el.appendChild(formNode);
-				var proto = 'masque';
-				try {
-					proto = protocolOpt.formvalue('main') || protocolOpt.cfgvalue('main') || 'masque';
-				}
-				catch (e) {
-					proto = uci.get('aether', 'main', 'protocol') || 'masque';
-				}
+				var proto = currentEffectiveProto('main');
 				aetherSyncProfileChoices(profileOpt, 'main', proto);
 				aetherSyncMasqueOptions(masqueOptionOpts, 'main', proto);
 				// --- Passwall2 Integration (rendered under Advanced settings) ---

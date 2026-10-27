@@ -21,7 +21,9 @@ proxy should be available only on the router itself.
 ## Protocols
 
 - **MASQUE**: modern HTTP/3/QUIC by default. Enable **HTTP/2** when UDP or
-  QUIC is blocked. `firewall` is the recommended MASQUE profile.
+  QUIC is blocked. `firewall` is the recommended MASQUE profile. Core v2.1.0
+  implements `firewall` and `gfw` for real; earlier cores advertised them but
+  fell through to `balanced`.
 - **WireGuard**: usually fast on networks where WireGuard traffic is allowed.
   Use `balanced`, `aggressive`, `light`, or `off`.
 - **WARP-in-WARP (gool)**: two WireGuard layers. It can work on stricter
@@ -47,6 +49,12 @@ endpoint and avoids a full scan when possible.
   `thorough`, `stealth`, and `ironclad` trade time for discovery or validation.
 - **IP Version**: use IPv4 unless the router has working IPv6.
 - **Force Peer**: optionally skip scanning and use a known `ip:port`.
+- **Exit Location Policy** (core v2.1+): refuse a finished tunnel whose
+  Cloudflare loc is unwanted before SOCKS opens, then recheck on a timer.
+  `!IR` (the fresh-install default) refuses Iranian exits; `!IR,AZ,RU` is a
+  deny list; `DE,SE` is an allow list; `off`/`auto`/empty disables the check.
+  While the core hunts another edge, SOCKS stays closed — the watchdog uses a
+  180s startup grace floor so a 120s grace cannot kill a still-legal hunt.
 - **HTTP/2 Mode** and **H2 Peer** apply to MASQUE and MIM. Use HTTP/2 when
   UDP/QUIC is blocked.
 - **TLS Fragmentation** applies to MASQUE/MIM HTTP/2 when its handshake is blocked.
@@ -74,7 +82,10 @@ endpoint and avoids a full scan when possible.
 - **Quick Reconnect** rechecks the cached endpoint before scanning.
 - **Data-plane Watchdog** periodically tests traffic through SOCKS5. After
   repeated failures it terminates the stuck core and lets procd start a clean
-  instance. Install `curl` to enable it.
+  instance. Install `curl` to enable it. With `exit_loc` active, startup grace
+  is at least 180 seconds.
+- **Log Traffic Stats** (core v2.1+) writes bytes up/down and uptime to syslog
+  (`logread -e aether`). Off by default.
 
 ## Zero Trust
 
@@ -164,6 +175,40 @@ firewall marks, and TLS key-share groups remain deliberately unexposed by this
 client. Transparent-proxy tools such as Passwall2 handle traffic splitting
 better on this router; the remaining controls retain their core defaults.
 
+## Modern gool, register and API options (core v2.3 / v2.4)
+
+- **gool Flavor** (core v2.3+): `modern` runs WireGuard inside a MASQUE tunnel
+  (the core default since 2.3); `classic` is the older WireGuard-in-WireGuard
+  hop pair. Existing gool installs are kept on `classic` by the installer.
+  Modern gool takes the MASQUE options (HTTP/2, fragmentation, ECH, SNI), an
+  optional **gool MASQUE Hop** (`gool_peer`), and can carry reverse Tor/Psiphon.
+  The dual-hop fields below belong to classic gool.
+- **Register** (core v2.3+): `aether-ctl register [masque|wg|gool|gool-classic|mim|all]`
+  registers WARP identities and exits without starting a tunnel. Stop the
+  service first. The core also registers on demand, so this is optional; use it
+  to pre-provision or to tell a registration failure from a tunnel failure.
+- **Gateway certificate pinning** (`tls_verify`): the core pins the gateway
+  certificate by default when a Zero Trust team is set. `0` disables it (sent to
+  the core through `AETHER_TLS_VERIFY`, never as a flag), `1` forces it on.
+- **ECH resolver / domain** (`ech_dns`, `ech_domain`, core v2.3+): used when ECH is set. `ech_dns` must be a URL (`udp://1.1.1.1:53`, `tcp://...` or `https://1.1.1.1/dns-query`); a bare IP makes the core stop.
+- **MASQUE SNI** (`masque_sni`, core v2.4+): TLS server name sent to the gateway;
+  core default `www.cloudflare.com`; a DNS name, not an IP.
+- **WARP API** (`api_address`, `api_host`, `api_sni`, core v2.4+): where and under
+  which names registration calls go. Leave empty for the core fallback chain.
+- **TLS fingerprint tuning** (core v2.4+): `tls_ciphers`, `tls13_ciphers`,
+  `tls_groups`, `tls_key_shares`, `tls_sigalgs`, `tls_cert_compression`,
+  `tls_alps`, `tls_trust_anchors`, `tls_server_padding`, and the switches
+  `disable_grease`, `enable_grease_sigalgs`, `enable_ech_grease`,
+  `disable_ocsp_stapling`, `disable_sct`, `disable_session_ticket`,
+  `disable_extension_permutation`. All off by default; wrong values can break the tunnel.
+- **Verified scan** (`scan_mode=verified`, core v2.4+): the quiet scan, formerly `stealth`.
+- **Upstream proxy** is validated (`[socks5|socks5h|http://][user:pass@]host:port`).
+  Core v2.4 exits when it cannot dial the upstream.
+- **Readiness**: in core v2.4 the SOCKS5 port is open immediately and clients wait
+  until the tunnel validates. Check `aether-ctl status`/`log`, not just the port.
+- **Fragment size** now defaults to `8-16` and, on v2.4, `fragment_tls` also
+  fragments the WARP API calls for WireGuard and classic gool.
+
 ## Dual-Hop gool Endpoints (core v1.9+)
 
 Core v1.9 lets you pin each WARP-in-WARP hop independently. In LuCI the
@@ -191,15 +236,17 @@ Tor is available through `tor_mode`:
 
 - `tunnel` keeps the normal WARP SOCKS5 listener and adds a Tor listener; Tor
   traffic travels through WARP.
-- `reverse` reaches MASQUE through Tor and leaves through WARP; it requires
-  MASQUE and HTTP/2.
+- `reverse` reaches MASQUE through Tor and leaves through WARP; it requires a
+  MASQUE-side carrier (MASQUE, MIM, or modern gool) over HTTP/2.
 - `only` serves Tor from the main SOCKS5 listener and does not establish WARP.
 
 The control appears only on Core v2; it requires a Core package built with Tor
 support and any required pluggable transports. The client gates the controls by
 version, not by inspecting whether the installed Core package has that build
-feature. `reverse` additionally requires the MASQUE protocol — the CLI rejects
-it against other protocols in both directions at set time.
+feature. `reverse` additionally requires a MASQUE-side carrier — MASQUE, MIM, or
+modern gool (core v2.3+). WireGuard and the classic gool are refused because the
+tunnel is dialled over Tor, which carries TCP only; the CLI rejects both
+directions at set time.
 
 The Status panel shows the configured `Tor` state (`Enabled at <bind>`,
 `Disabled`, or `Needs core v2.0+`); it is not proof that Tor has bootstrapped.
@@ -213,16 +260,54 @@ aether-ctl check-tor        # Tor exit IP and IsTor status (alias: tor-ip)
 
 `tor_bind` (default `127.0.0.1:1820`) and `tor_dir` tune the listener and
 state directory; `tor_bridges` (`auto`/`on`/`off`) controls bridge fallback
-for blocked networks. The CLI check is bounded (8s connect / 22s max) so the
-LuCI button stays under the ubus RPC timeout — slow circuits report `FAILED`,
-never a transport error. In manual command mode without `--tor` in the
-arguments, `check-tor` refuses instantly instead of timing out.
+for blocked networks. Core v2.1 also fetches bridgedb through the WARP tunnel
+when Tor rides inside it, and adds:
+
+- `tor_relays` (`auto` / `only` / `off` / a count) for onionoo relays as extra
+  bridges;
+- `tor_relay_ports` (`web` = 80/443, `any`);
+- `tor_bridge_file` for a torrc-style bridge list;
+- `tor_http` for an optional HTTP CONNECT listener on the Tor exit.
+
+The CLI check is bounded (8s connect / 22s max) so the LuCI button stays under
+the ubus RPC timeout — slow circuits report `FAILED`, never a transport error.
+In manual command mode without `--tor` in the arguments, `check-tor` refuses
+instantly instead of timing out.
 
 If the Tor listener accepts connections but bootstrap never completes, look
 for `problem with filesystem permissions` in `logread -e aether`: Arti
 refuses state whose ancestor directories are not root-owned or are
 group/world-writable (stock OpenWrt images and tar overlays both break this).
 The service repairs `/` and `/etc` automatically on every Tor-enabled start.
+
+## Psiphon (core v2.1+)
+
+Psiphon uses the same three-mode shape as Tor and needs the Psiphon console
+client from the core archive in `/usr/bin/pt` (installed automatically).
+
+- `tunnel` keeps the WARP SOCKS5 listener and adds a Psiphon listener
+  (`psiphon_bind`, default `127.0.0.1:1821`); Psiphon traffic travels through
+  WARP.
+- `reverse` reaches MASQUE through Psiphon and leaves through WARP; it requires a
+  MASQUE-side carrier (MASQUE, MIM, or modern gool, core forces HTTP/2) and is
+  refused for WireGuard and the classic gool.
+- `only` serves Psiphon from the main SOCKS5 listener and does not establish
+  WARP. It cannot be combined with `tor_mode=only`.
+
+`psiphon_front` (`auto`/`cdn`/`direct`) maps to `--psiphon-mode` and is omitted
+when `auto`. `psiphon_region` is a two-letter country such as `DE`.
+`psiphon_http` is an optional HTTP CONNECT listener.
+
+The Status panel shows the configured `Psiphon` state. A **Check Psiphon IP**
+button (and `aether-ctl check-psiphon`, alias `psiphon-ip`) probes the Psiphon
+SOCKS listener with the same 8s/22s bound as `check-tor`. In manual mode
+without `--psiphon` in the arguments, the check refuses immediately.
+
+```sh
+aether-ctl set psiphon_mode tunnel
+aether-ctl set psiphon_front cdn
+aether-ctl check-psiphon
+```
 
 ## Custom Command Line
 
@@ -242,11 +327,11 @@ arguments:
   `custom_command`; `auto` clears the latter on the CLI).
 
 Manual mode bypasses **every** UCI option — protocol, Tor, binds, everything.
-The `test`, `check-ip`, and `check-tor` probes read the manual binds instead
-(`check-tor` refuses immediately when `--tor` is absent rather than timing
-out). The CLI validates `set` values up front (`tor_bind` as `ip:port`,
-`tor_dir` as an absolute path, `reverse` only with MASQUE) and `status`/`show`
-show
+The `test`, `check-ip`, `check-tor`, and `check-psiphon` probes read the
+manual binds instead (`check-tor` / `check-psiphon` refuse immediately when
+`--tor` / `--psiphon` is absent rather than timing out). The CLI validates
+`set` values up front (`tor_bind` as `ip:port`, `tor_dir` as an absolute path,
+`reverse` only over MASQUE, MIM, or modern gool) and `status`/`show` show
 the effective obfuscation profile, e.g. `balanced (stored firewall)` when the
 stored value is remapped for the protocol family.
 
@@ -262,6 +347,7 @@ aether-ctl log 100
 aether-ctl test google.com
 aether-ctl check-ip                     # public IP, country, latency
 aether-ctl check-tor                    # Tor exit IP and IsTor status (v2+ Tor modes)
+aether-ctl check-psiphon                # Psiphon exit IP (v2.1+ Psiphon modes)
 aether-ctl passwall status            # Passwall2 bridge status
 aether-ctl passwall localhost off     # disable Passwall2 router-local proxying
 aether-ctl set protocol wg
@@ -273,6 +359,8 @@ aether-ctl set protocol mim                     # MASQUE-in-MASQUE (v2+)
 aether-ctl set quic_v2 off                      # disable v2 QUIC opener (v2+)
 aether-ctl set ech auto                         # enable ECH discovery (v1.9+)
 aether-ctl set tor_mode tunnel                  # Tor through WARP (v2+)
+aether-ctl set exit_loc '!IR'                   # refuse Iranian WARP exits (v2.1+)
+aether-ctl set psiphon_mode tunnel              # Psiphon through WARP (v2.1+)
 aether-ctl set command_mode manual               # custom core arguments
 aether-ctl set custom_command '--bind 0.0.0.0:1819 --wg'  # space-separated
 aether-ctl passwall add-node          # create a socks node pointing at Aether
@@ -305,7 +393,7 @@ chmod +x /tmp/aether-install.sh
 ```
 
 The installer lists up to five newest stable core releases from v1.5.0 onward
-and defaults to v2.0.0. For automation use `--non-interactive`; add
+and defaults to v2.4.0. For automation use `--non-interactive`; add
 `--version vX.Y.Z` to choose a valid published release from v1.5.0 onward.
 `aether-ctl update` fetches the latest repository updater and runs the same
 installer flow; `aether-ctl change-version vX.Y.Z` is the explicit shortcut for
@@ -342,7 +430,8 @@ Use `--purge` only when you also want to delete `/etc/config/aether` and
 - Check service state: `aether-ctl status`.
 - Read recent logs: `aether-ctl log 100`.
 - Test through the tunnel: `aether-ctl test google.com`.
-- Check the exit: `aether-ctl check-ip`; for Tor: `aether-ctl check-tor`.
+- Check the exit: `aether-ctl check-ip`; for Tor: `aether-ctl check-tor`;
+  for Psiphon: `aether-ctl check-psiphon`.
 - If the service is running but traffic fails, wait for the watchdog or use
   `aether-ctl restart`.
 - Tor listening on `:1820` but never connecting: look for `problem with

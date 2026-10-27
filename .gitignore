@@ -1,8 +1,19 @@
-plans/
-core-GUIDE.en.md
+# --- local working documents: never pushed -------------------------------
+# Agent/maintainer notes and plans (see AGENTS.md section 5). They must stay on
+# disk, but they are never part of the shipped package or the public history.
 AGENTS.md
 ARCHITECTURE.md
 MEMORY.md
 TASKS.md
+FIX-PLAN.md
+WHATS-DONE.md
+V2-CORE-COMPATIBILITY-PLAN.md
+V2.4-CORE-COMPATIBILITY-PLAN.md
+V2.4-CORE-COMPATIBILITY-PLAN.fa.md
+plans/
+core-GUIDE.en.md
+
+# --- local/tooling artifacts --------------------------------------------
 .commandcode/
 backup/
+.dsh-write-probe.txt

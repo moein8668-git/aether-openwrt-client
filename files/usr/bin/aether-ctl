@@ -1,6 +1,6 @@
 #!/bin/sh
 # aether-ctl — CLI management tool for Aether on OpenWrt
-# Usage: aether-ctl {start|stop|restart|status|show|set|version|change-version|test|check-ip|check-tor|update}
+# Usage: aether-ctl {start|stop|restart|status|show|set|version|change-version|test|check-ip|check-tor|check-psiphon|update}
 
 UCI="/sbin/uci"
 PROG="/usr/bin/aether"
@@ -76,6 +76,158 @@ core_supports_v20() {
 	[ "$major" -ge 2 ] 2>/dev/null
 }
 
+# v2.1 adds exit-location policy, Psiphon, Tor relays/HTTP, and --stats.
+core_supports_v21() {
+	local version="$1" major minor rest
+	major="${version%%.*}"
+	rest="${version#*.}"
+	minor="${rest%%.*}"
+	[ "$major" -gt 2 ] 2>/dev/null ||
+		{ [ "$major" -eq 2 ] 2>/dev/null && [ "$minor" -ge 1 ] 2>/dev/null; }
+}
+
+# v2.3 splits gool into modern (WireGuard inside MASQUE, --gool) and classic
+# (--gool-classic) and adds --gool-peer, --register, --tls-verify, --ech-dns.
+core_supports_v23() {
+	local version="$1" major minor rest
+	major="${version%%.*}"
+	rest="${version#*.}"
+	minor="${rest%%.*}"
+	[ "$major" -gt 2 ] 2>/dev/null ||
+		{ [ "$major" -eq 2 ] 2>/dev/null && [ "$minor" -ge 3 ] 2>/dev/null; }
+}
+
+# v2.4 adds --masque-sni, --api-address/--api-host/--api-sni and the TLS
+# fingerprint options, holds listeners from the start and refuses a bad --upstream.
+core_supports_v24() {
+	local version="$1" major minor rest
+	major="${version%%.*}"
+	rest="${version#*.}"
+	minor="${rest%%.*}"
+	[ "$major" -gt 2 ] 2>/dev/null ||
+		{ [ "$major" -eq 2 ] 2>/dev/null && [ "$minor" -ge 4 ] 2>/dev/null; }
+}
+
+# Pure capability rule, so it can be unit-tested without a core or UCI:
+# reverse Tor/Psiphon needs a carrier that speaks TCP. The core refuses only
+# --wg and --gool-classic (see "aether --help": "... refuses --wg and
+# --gool-classic"), so masque, mim and the modern gool (WireGuard inside
+# MASQUE, core v2.3+, gool_mode not classic) are all allowed.
+#   reverse_capable <protocol> <core-version> <gool-mode>
+reverse_capable() {
+	local proto="$1" ver="$2" gmode="$3"
+	case "$proto" in
+		''|masque|mim) return 0 ;;
+		gool)
+			[ -n "$ver" ] || return 1
+			core_supports_v23 "$ver" || return 1
+			[ "$gmode" != "classic" ] ;;
+		*) return 1 ;;
+	esac
+}
+
+# Wrapper: reads the installed core version and the stored gool flavor.
+# Prints nothing, returns 0/1.
+reverse_protocol_ok() {
+	local proto="${1:-masque}"
+	reverse_capable "$proto" "$(core_version)" "$(uci_get gool_mode)"
+}
+
+# Core v2.4 TLS fingerprint options (value options and 0/1 switches).
+TLS_VALUE_KEYS="tls_ciphers tls13_ciphers tls_groups tls_key_shares tls_sigalgs tls_cert_compression tls_alps tls_trust_anchors tls_server_padding"
+TLS_SWITCH_KEYS="disable_grease enable_grease_sigalgs enable_ech_grease disable_ocsp_stapling disable_sct disable_session_ticket disable_extension_permutation"
+
+# Same rules as the init script: [scheme://][user:pass@]host:port, port 1-65535,
+# schemes socks5/socks5h/http (https only without credentials).
+valid_upstream() {
+	local url="$1" scheme="" rest hostport host port
+	[ -n "$url" ] || return 1
+	case "$url" in
+		*://*)
+			scheme="${url%%://*}"
+			rest="${url#*://}"
+			;;
+		*) rest="$url" ;;
+	esac
+	case "$scheme" in
+		''|socks5|socks5h|http) ;;
+		https)
+			case "$rest" in *@*) return 1 ;; esac ;;
+		*) return 1 ;;
+	esac
+	rest="${rest%%/*}"
+	hostport="${rest##*@}"
+	[ -n "$hostport" ] || return 1
+	case "$hostport" in
+		'['*']:'*)
+			host="${hostport%%]:*}"
+			host="${host#[}"
+			port="${hostport##*]:}"
+			;;
+		'['*) return 1 ;;
+		*:*)
+			host="${hostport%:*}"
+			port="${hostport##*:}"
+			case "$host" in *:*) return 1 ;; esac
+			;;
+		*) return 1 ;;
+	esac
+	[ -n "$host" ] || return 1
+	case "$port" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null
+}
+
+# A DNS name (labels of letters, digits and hyphens separated by dots).
+# Rejects IPv4 literals, which --masque-sni refuses.
+valid_domain() {
+	local d="$1" label rest
+	[ -n "$d" ] || return 1
+	case "$d" in
+		*[!A-Za-z0-9.-]*|.*|*.|*..*|-*|*-.*|*.-*) return 1 ;;
+		*.*) ;;
+		*) return 1 ;;
+	esac
+	# An all-numeric dotted string is an IPv4 address, not a name.
+	case "$d" in
+		*[A-Za-z]*) ;;
+		*) return 1 ;;
+	esac
+	rest="$d."
+	while [ -n "$rest" ]; do
+		label="${rest%%.*}"
+		rest="${rest#*.}"
+		[ -n "$label" ] && [ "${#label}" -le 63 ] || return 1
+	done
+	[ "${#d}" -le 253 ]
+}
+
+# ip:port, [ipv6]:port, or host:port with port 1-65535.
+valid_hostport() {
+	local v="$1" host port
+	case "$v" in
+		'['*']:'*) host="${v%%]:*}"; host="${host#[}"; port="${v##*]:}" ;;
+		*:*) host="${v%:*}"; port="${v##*:}"; case "$host" in *:*) return 1 ;; esac ;;
+		*) return 1 ;;
+	esac
+	[ -n "$host" ] || return 1
+	case "$port" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null
+}
+
+# api_address: IP or name, optional :port (an IPv6 literal needs brackets).
+valid_api_address() {
+	local v="$1" stripped
+	[ -n "$v" ] || return 1
+	stripped="$(printf '%s' "$v" | tr -d 'A-Za-z0-9.:[]-')"
+	[ -z "$stripped" ] || return 1
+	case "$v" in
+		'['*']') return 0 ;;
+		'['*) valid_hostport "$v" ;;
+		*:*) valid_hostport "$v" ;;
+		*) return 0 ;;
+	esac
+}
+
 # Automatic performance profile from total RAM:
 # <256MB -> low, 256MB-768MB -> medium, >768MB -> high
 select_perf_profile() {
@@ -137,6 +289,28 @@ wait_running() {
 	is_running
 }
 
+# Core v2.4 holds the SOCKS5 listener from process start and queues clients
+# until the tunnel validates, so an open port proves nothing. Readiness is the
+# "socks5 server listening on <bind>" log line after the newest "Starting
+# Aether core" line. Prints stopped | starting | ready | unknown (unknown: log
+# rotated away, or manual command mode where the bind is not in UCI).
+tunnel_state() {
+	local logs start_n total port
+	is_running || { echo stopped; return; }
+	[ "$(uci_get command_mode)" = "manual" ] && { echo unknown; return; }
+	port="$(uci_get socks_listen)"
+	port="${port##*:}"
+	[ -n "$port" ] || port=1819
+	logs="$(logread -e aether 2>/dev/null)"
+	start_n="$(printf '%s\n' "$logs" | grep -n 'Starting Aether core' | tail -n 1 | cut -d: -f1)"
+	[ -n "$start_n" ] || { echo unknown; return; }
+	if printf '%s\n' "$logs" | tail -n "+$start_n" | grep -q "socks5 server listening on [^ ]*:$port\$"; then
+		echo ready
+	else
+		echo starting
+	fi
+}
+
 do_start() {
 	if is_running; then
 		log_warn "Aether is already running (PID $(service_pid))"
@@ -161,6 +335,46 @@ do_stop() {
 	log_info "Aether stopped"
 }
 
+# Register WARP identities without starting a tunnel (core v2.3+: --register).
+# Useful for pre-provisioning, or to separate a registration failure from a
+# tunnel failure. The service must be stopped so two processes never write
+# the same identity file.
+do_register() {
+	local which="${1:-all}" ver cfg v
+	ver="$(core_version)"
+	if [ -z "$ver" ] || ! core_supports_v23 "$ver"; then
+		log_err "register requires Aether core v2.3.0 or newer (installed: ${ver:-unknown})"
+		return 1
+	fi
+	case "$which" in
+		masque|wg|gool|gool-classic|mim|all) ;;
+		*) log_err "Usage: aether-ctl register [masque|wg|gool|gool-classic|mim|all]"; return 1 ;;
+	esac
+	if is_running; then
+		log_err "Aether is running; stop it first: aether-ctl stop"
+		return 1
+	fi
+	cfg="$(uci_get config_path)"
+	[ -n "$cfg" ] || cfg=/etc/aether/aether.toml
+	mkdir -p "$(dirname "$cfg")" 2>/dev/null
+	# A 0-byte or corrupt stub makes the core fail with "device_id missing";
+	# a missing file is provisioned cleanly.
+	for v in "$cfg" "$(dirname "$cfg")"/*.toml; do
+		[ -f "$v" ] && ! [ -s "$v" ] && rm -f "$v"
+	done
+	set -- --register "$which" --config "$cfg"
+	if core_supports_v24 "$ver"; then
+		v="$(uci_get api_address)"; [ -n "$v" ] && set -- "$@" --api-address "$v"
+		v="$(uci_get api_host)";    [ -n "$v" ] && set -- "$@" --api-host "$v"
+		v="$(uci_get api_sni)";     [ -n "$v" ] && set -- "$@" --api-sni "$v"
+		[ "$(uci_get fragment_tls)" = "1" ] && set -- "$@" --fragment
+	fi
+	v="$(uci_get upstream_proxy)"
+	[ -n "$v" ] && core_supports_v17 "$ver" && set -- "$@" --upstream "$v"
+	log_info "Registering identities: $which (config $cfg)"
+	/usr/bin/aether-run "$@"
+}
+
 do_restart() {
 	log_info "Restarting Aether..."
 	/etc/init.d/aether restart
@@ -178,6 +392,10 @@ do_status() {
 	if is_running; then
 		log_key "State" "running"
 		log_key "PID" "$(service_pid)"
+		case "$(tunnel_state)" in
+			ready) log_key "Tunnel" "ready" ;;
+			starting) log_key "Tunnel" "starting (scanning/validating; SOCKS5 queues clients until ready)" ;;
+		esac
 	else
 		log_key "State" "stopped"
 	fi
@@ -241,12 +459,57 @@ do_show() {
 	local quic_v2=$(uci_get quic_v2)
 	local ech=$(uci_get ech)
 	local tor_mode=$(uci_get tor_mode)
+	local tor_relays=$(uci_get tor_relays)
+	local tor_relay_ports=$(uci_get tor_relay_ports)
+	local tor_bridge_file=$(uci_get tor_bridge_file)
+	local tor_http=$(uci_get tor_http)
+	local exit_loc=$(uci_get exit_loc)
+	local exit_loc_secs=$(uci_get exit_loc_secs)
+	local psiphon_mode=$(uci_get psiphon_mode)
+	local psiphon_bind=$(uci_get psiphon_bind)
+	local psiphon_http=$(uci_get psiphon_http)
+	local psiphon_front=$(uci_get psiphon_front)
+	local psiphon_region=$(uci_get psiphon_region)
 	local supports_v20=0
 	[ -n "$installed_version" ] && core_supports_v20 "$installed_version" && supports_v20=1
+	local supports_v21=0
+	[ -n "$installed_version" ] && core_supports_v21 "$installed_version" && supports_v21=1
+	local stats=$(uci_get stats)
+	local gool_mode=$(uci_get gool_mode)
+	local gool_peer=$(uci_get gool_peer)
+	local masque_sni=$(uci_get masque_sni)
+	local api_address=$(uci_get api_address)
+	local api_host=$(uci_get api_host)
+	local api_sni=$(uci_get api_sni)
+	local tls_verify=$(uci_get tls_verify)
+	local ech_dns=$(uci_get ech_dns)
+	local ech_domain=$(uci_get ech_domain)
+	local fragment_size=$(uci_get fragment_size)
+	local fragment_delay=$(uci_get fragment_delay)
+	local supports_v23=0 supports_v24=0 gool_effective="" tls_set="" tls_opt tls_val
+	[ -n "$installed_version" ] && core_supports_v23 "$installed_version" && supports_v23=1
+	[ -n "$installed_version" ] && core_supports_v24 "$installed_version" && supports_v24=1
+	# Effective gool flavor: core v2.3+ defaults to modern; older cores only
+	# have the classic WireGuard-in-WireGuard transport.
+	if [ "${protocol:-masque}" = "gool" ]; then
+		if [ "$supports_v23" -eq 1 ] && [ "$gool_mode" != "classic" ]; then
+			gool_effective="modern"
+		else
+			gool_effective="classic"
+		fi
+	fi
 
 	log_key "Boot Enabled" "$([ "$enabled" = "1" ] && echo "yes" || echo "no")"
 	log_key "Core Version" "${installed_version:-unknown}"
-	log_key "Protocol" "${protocol:-masque}"
+	if [ -n "$gool_effective" ]; then
+		if [ "$gool_effective" = "modern" ]; then
+			log_key "Protocol" "gool (modern: WireGuard inside MASQUE)"
+		else
+			log_key "Protocol" "gool (classic: WireGuard inside WireGuard)"
+		fi
+	else
+		log_key "Protocol" "${protocol:-masque}"
+	fi
 	log_key "SOCKS Listen" "${socks_listen:-0.0.0.0:1819}"
 	if [ "$supports_v16" -eq 1 ]; then
 		[ -n "$http_proxy" ] && log_key "HTTP Proxy" "$http_proxy"
@@ -264,7 +527,13 @@ do_show() {
 	# protocol family (masque/mim: firewall/gfw/off; wg/gool: balanced/aggressive/light/off).
 	stored_obfuscation="$obfuscation_profile"
 	case "${protocol:-masque}" in
-		wg|gool)
+		gool)
+			if [ "$gool_effective" = "modern" ]; then
+				case "$obfuscation_profile" in balanced|firewall|gfw|aggressive|light|off) ;; *) obfuscation_profile=balanced ;; esac
+			else
+				case "$obfuscation_profile" in balanced|aggressive|light|off) ;; *) obfuscation_profile=balanced ;; esac
+			fi ;;
+		wg)
 			case "$obfuscation_profile" in balanced|aggressive|light|off) ;; *) obfuscation_profile=balanced ;; esac ;;
 		*)
 			case "$obfuscation_profile" in firewall|gfw|off) ;; *) obfuscation_profile=firewall ;; esac ;;
@@ -282,7 +551,14 @@ do_show() {
 	log_key "Reconnect" "${reconnect_secs:-2}s"
 	log_key "Validate" "${validate_secs:-10}s"
 	if [ "$supports_v16" -eq 1 ]; then
-		[ "${protocol:-masque}" = "masque" ] && log_key "Startup Deadline" "${startup_secs:-30}s"
+		# init.d passes --startup-secs on every MASQUE-side transport
+		# (masque, mim and modern gool), so show it there too.
+		case "${protocol:-masque}" in
+			masque|mim) log_key "Startup Deadline" "${startup_secs:-30}s" ;;
+			gool)
+				[ "$gool_effective" = "modern" ] &&
+					log_key "Startup Deadline" "${startup_secs:-30}s" ;;
+		esac
 	else
 		log_key "Startup Deadline" "inactive on core v${installed_version:-unknown}"
 	fi
@@ -301,15 +577,55 @@ do_show() {
 		log_key "Perf Profile" "inactive on core v${installed_version:-unknown}"
 	fi
 	if [ "${protocol:-masque}" = "gool" ]; then
-		if [ "$supports_v19" -eq 1 ]; then
-			log_key "gool Outer Hop" "${wiw_outer:-auto-scan}"
-			log_key "gool Inner Hop" "${wiw_inner:-auto-scan}"
-		else
-			log_key "gool Hops" "inactive on core v${installed_version:-unknown}"
+		# The dual-hop endpoints belong to the classic WireGuard-in-WireGuard
+		# transport only; modern gool never emits --wiw-*.
+		if [ "$gool_effective" = "classic" ]; then
+			if [ "$supports_v19" -eq 1 ]; then
+				log_key "gool Outer Hop" "${wiw_outer:-auto-scan}"
+				log_key "gool Inner Hop" "${wiw_inner:-auto-scan}"
+			else
+				log_key "gool Hops" "inactive on core v${installed_version:-unknown}"
+			fi
 		fi
 	fi
-	if [ "$supports_v19" -eq 1 ] && [ -n "$ech" ]; then
+	if [ "$gool_effective" = "modern" ] && [ -n "$gool_peer" ]; then
+		log_key "gool Peer" "$gool_peer"
+	fi
+	# ECH rides on the MASQUE handshakes: masque, mim and modern gool only.
+	# init.d emits --ech (and --ech-dns/--ech-domain) for exactly that family.
+	local masque_side=0
+	case "${protocol:-masque}" in
+		masque|mim) masque_side=1 ;;
+		gool) [ "$gool_effective" = "modern" ] && masque_side=1 ;;
+	esac
+	if [ "$masque_side" -eq 1 ] && [ "$supports_v19" -eq 1 ] && [ -n "$ech" ]; then
 		log_key "ECH" "$ech"
+	fi
+	if [ "$masque_side" -eq 1 ] && [ "$supports_v23" -eq 1 ]; then
+		[ -n "$ech_dns" ] && log_key "ECH DNS" "$ech_dns"
+		[ -n "$ech_domain" ] && log_key "ECH Domain" "$ech_domain"
+	fi
+	if [ "$supports_v24" -eq 1 ]; then
+		[ -n "$masque_sni" ] && log_key "MASQUE SNI" "$masque_sni"
+		[ -n "$api_address" ] && log_key "API Address" "$api_address"
+		[ -n "$api_host" ] && log_key "API Host" "$api_host"
+		[ -n "$api_sni" ] && log_key "API SNI" "$api_sni"
+		if [ "$fragment_tls" = "1" ]; then
+			log_key "Fragment Size" "${fragment_size:-8-16}"
+			[ -n "$fragment_delay" ] && log_key "Fragment Delay" "$fragment_delay"
+		fi
+		# TLS fingerprint tuning (core v2.4+); list only options that are set.
+		for tls_opt in $TLS_VALUE_KEYS $TLS_SWITCH_KEYS; do
+			tls_val="$(uci_get "$tls_opt")"
+			case " $TLS_SWITCH_KEYS " in
+				*" $tls_opt "*) [ "$tls_val" = "1" ] && tls_set="$tls_set $tls_opt" ;;
+				*) [ -n "$tls_val" ] && tls_set="$tls_set $tls_opt=$tls_val" ;;
+			esac
+		done
+		[ -n "$tls_set" ] && log_key "TLS Tuning" "${tls_set# }"
+	fi
+	if [ "$supports_v23" -eq 1 ] && [ "$tls_verify" = "0" ]; then
+		log_key "Gateway Cert Check" "disabled (AETHER_TLS_VERIFY=0)"
 	fi
 	if [ "${protocol:-masque}" = "mim" ]; then
 		if [ "$supports_v20" -eq 1 ]; then
@@ -323,6 +639,30 @@ do_show() {
 	if [ "$supports_v20" -eq 1 ]; then
 		log_key "QUIC v2 Opener" "$([ "$quic_v2" = "0" ] && echo "off" || echo "on")"
 		log_key "Tor" "${tor_mode:-off}"
+		if [ "$supports_v21" -eq 1 ]; then
+			[ -n "$tor_relays" ] && [ "$tor_relays" != "auto" ] &&
+				log_key "Tor Relays" "$tor_relays"
+			[ -n "$tor_relay_ports" ] && [ "$tor_relay_ports" != "web" ] &&
+				log_key "Tor Relay Ports" "$tor_relay_ports"
+			[ -n "$tor_bridge_file" ] && log_key "Tor Bridge File" "$tor_bridge_file"
+			[ -n "$tor_http" ] && log_key "Tor HTTP" "$tor_http"
+		fi
+	fi
+	if [ "$supports_v21" -eq 1 ]; then
+		case "$exit_loc" in
+			''|off|auto) log_key "Exit Location" "off" ;;
+			*) log_key "Exit Location" "$exit_loc (${exit_loc_secs:-60}s)" ;;
+		esac
+		log_key "Psiphon" "${psiphon_mode:-off}"
+		if [ -n "$psiphon_mode" ] && [ "$psiphon_mode" != "off" ]; then
+			[ "$psiphon_mode" != "only" ] &&
+				log_key "Psiphon Bind" "${psiphon_bind:-127.0.0.1:1821}"
+			[ -n "$psiphon_http" ] && log_key "Psiphon HTTP" "$psiphon_http"
+			[ -n "$psiphon_front" ] && [ "$psiphon_front" != "auto" ] &&
+				log_key "Psiphon Front" "$psiphon_front"
+			[ -n "$psiphon_region" ] && log_key "Psiphon Region" "$psiphon_region"
+		fi
+		log_key "Stats Log" "$([ "$stats" = "1" ] && echo "on" || echo "off")"
 	fi
 	log_key "Zero Trust Team" "${team:-disabled}"
 	if [ -n "$team" ]; then
@@ -364,6 +704,95 @@ manual_has_tor() {
 	esac
 }
 
+# Prints 1 when custom_command carries any Psiphon flag, else 0.
+manual_has_psiphon() {
+	case " $1 " in
+		*" --psiphon "*|*" --psiphon-only "*|*" --psiphon-reverse "*) echo 1 ;;
+		*) echo 0 ;;
+	esac
+}
+
+# Core v2.4 TLS value lists. The core parses these itself and exits on anything
+# it cannot take: names are separated by ':' only (a comma is fatal, even though
+# some of the upstream docs show lists), and each kind has its own alphabet.
+#   valid_tls_list <value> <ciphers|groups|sigalgs|trustanchors|compression>
+valid_tls_list() {
+	local value="$1" kind="$2" item rest
+	[ -n "$value" ] || return 1
+	rest="$value:"
+	while [ -n "$rest" ]; do
+		item="${rest%%:*}"
+		rest="${rest#*:}"
+		# An empty item means a leading, trailing or doubled separator.
+		[ -n "$item" ] || return 1
+		case "$kind" in
+			ciphers)
+				# BoringSSL cipher names, optionally prefixed with ! + or -
+				case "$item" in
+					"!"*) item="${item#!}" ;;
+					"+"*) item="${item#+}" ;;
+					"-"*) item="${item#-}" ;;
+				esac
+				case "$item" in ''|*[!A-Za-z0-9_+-]*) return 1 ;; esac ;;
+			groups|sigalgs)
+				case "$item" in *[!A-Za-z0-9_.+-]*) return 1 ;; esac ;;
+			trustanchors)
+				# A relative OID in dotted decimal, e.g. 11129.9.1
+				case "$item" in *[!0-9.]*|.*|*.|*..*) return 1 ;; esac ;;
+			compression)
+				case "$item" in zlib|brotli|zstd) ;; *) return 1 ;; esac ;;
+			*) return 1 ;;
+		esac
+	done
+	return 0
+}
+
+# --tls-server-padding accepts 0..65535 only.
+valid_tls_padding() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -le 65535 ] 2>/dev/null
+}
+
+# Valid --exit-loc specs: off/auto/empty, !IR,AZ,RU, DE,SE, !=IR, =DE.
+valid_exit_loc() {
+	local spec="$1" body rest token n=0
+	case "$spec" in
+		off|auto|'') return 0 ;;
+	esac
+	body="$spec"
+	case "$body" in !*) body="${body#!}" ;; esac
+	case "$body" in =*) body="${body#=}" ;; esac
+	case "$body" in !*) body="${body#!}" ;; esac
+	[ -n "$body" ] || return 1
+	rest="$body,"
+	while [ -n "$rest" ]; do
+		token="${rest%%,*}"
+		rest="${rest#*,}"
+		token="$(echo "$token" | tr -d ' \t' | tr 'a-z' 'A-Z')"
+		[ -z "$token" ] && continue
+		case "$token" in
+			[A-Z][A-Z]) n=$((n + 1)) ;;
+			*) return 1 ;;
+		esac
+	done
+	[ "$n" -gt 0 ]
+}
+
+# Map an accepted exit_loc spec to the value stored in UCI. "off", "auto" and an
+# empty value all mean "no policy" and are stored as the literal token off, never
+# as an empty value: `uci set aether.main.exit_loc=` deletes the option, and an
+# absent option means "no policy" to init.d, so an empty write would make
+# `set exit_loc off` a silent no-op. Country tokens are upper-cased (the core
+# documents them as DE,SE) and stray whitespace is dropped.
+normalize_exit_loc() {
+	local spec
+	spec="$(echo "$1" | tr -d ' \t' | tr 'a-z' 'A-Z')"
+	case "$spec" in
+		''|OFF|AUTO) echo "off" ;;
+		*) echo "$spec" ;;
+	esac
+}
+
 do_test() {
 	local target="$1"
 	if [ -z "$target" ]; then
@@ -402,6 +831,8 @@ do_test() {
 		return 1
 	fi
 
+	[ "$(tunnel_state)" = "starting" ] &&
+		log_warn "Tunnel is still starting; the SOCKS5 port waits for validation, so this test may time out. Check: aether-ctl status"
 	log_info "Testing $target via SOCKS5 ($socks)..."
 
 	# Use --socks5-hostname for DNS resolution through proxy
@@ -479,6 +910,8 @@ do_check_ip() {
 		return 1
 	fi
 
+	[ "$(tunnel_state)" = "starting" ] &&
+		log_warn "Tunnel is still starting; the SOCKS5 port waits for validation, so this check may time out. Check: aether-ctl status"
 	log_info "Checking public IP via SOCKS5 ($socks)..."
 
 	local raw exit_code meta body http_code time_s time_ms ip country
@@ -674,10 +1107,87 @@ do_check_tor() {
 	return 1
 }
 
+do_check_psiphon() {
+	local psiphon_mode socks installed_version mode custom
+	local raw exit_code meta body http_code time_s time_ms ip loc
+	installed_version="$(core_version)"
+	if [ -z "$installed_version" ] || ! core_supports_v21 "$installed_version"; then
+		log_err "Psiphon requires Aether core v2.1.0 or newer (installed: ${installed_version:-unknown})"
+		return 1
+	fi
+	mode=$(uci_get command_mode)
+	if [ "$mode" = "manual" ]; then
+		custom=$(uci_get custom_command)
+		if [ "$(manual_has_psiphon "$custom")" != "1" ]; then
+			log_err "Psiphon not in custom_command (add --psiphon --psiphon-bind 127.0.0.1:1821 or switch to generated mode)"
+			return 1
+		fi
+		case " $custom " in
+			*" --psiphon-only "*) socks=$(manual_opt "$custom" --bind) ;;
+			*) socks=$(manual_opt "$custom" --psiphon-bind) ;;
+		esac
+	else
+		psiphon_mode=$(uci_get psiphon_mode)
+		case "$psiphon_mode" in
+			tunnel|reverse|only) ;;
+			*)
+				log_err "Psiphon is off (psiphon_mode=${psiphon_mode:-off}). Enable with: aether-ctl set psiphon_mode tunnel"
+				return 1 ;;
+		esac
+		if [ "$psiphon_mode" = "only" ]; then
+			socks=$(uci_get socks_listen)
+		else
+			socks=$(uci_get psiphon_bind)
+		fi
+	fi
+	socks=$(echo "$socks" | sed 's/0\.0\.0\.0/127.0.0.1/')
+	[ -z "$socks" ] && socks="127.0.0.1:1821"
+
+	if ! command -v curl >/dev/null 2>&1; then
+		log_err "curl not found. Install curl using your package manager."
+		return 1
+	fi
+
+	log_info "Checking Psiphon exit via SOCKS5 ($socks)..."
+
+	raw=$(curl -s \
+		-w "\n%{http_code} %{time_total}" \
+		--socks5-hostname "$socks" \
+		--connect-timeout 8 --max-time 22 \
+		"https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null)
+	exit_code=$?
+
+	if [ $exit_code -eq 0 ] && [ -n "$raw" ]; then
+		meta=$(echo "$raw" | tail -n 1)
+		body=$(echo "$raw" | sed '$d')
+		http_code=$(echo "$meta" | awk '{print $1}')
+		time_s=$(echo "$meta" | awk '{print $2}')
+		time_ms=$(awk -v t="$time_s" 'BEGIN{printf "%.0f", t*1000}')
+		[ -z "$time_ms" ] && time_ms="0"
+		ip=""
+		loc=""
+		if [ "$http_code" = "200" ]; then
+			ip=$(printf '%s' "$body" | sed -n 's/^ip=\(.*\)$/\1/p' | head -n1)
+			loc=$(printf '%s' "$body" | sed -n 's/^loc=\(.*\)$/\1/p' | head -n1)
+		fi
+		if [ -n "$ip" ]; then
+			if [ -n "$loc" ]; then
+				log_info "Psiphon: IP: $ip ($loc) ${time_ms}ms"
+			else
+				log_info "Psiphon: IP: $ip ${time_ms}ms"
+			fi
+			return 0
+		fi
+	fi
+
+	log_err "FAILED ${time_ms:-22000}ms"
+	return 1
+}
+
 do_set() {
 	local key="$1"
 	local value="$2"
-	local installed_version proto_tor tor_proto
+	local installed_version proto_tor tor_proto proto_psiphon psiphon_proto tls_kind
 	installed_version="$(core_version)"
 
 	if [ -z "$key" ] || [ -z "$value" ]; then
@@ -689,7 +1199,7 @@ do_set() {
 		echo "  socks_listen        ip:port"
 		echo "  http_proxy          ip:port (optional HTTP CONNECT proxy)"
 		echo "  upstream_proxy      proxy URL (v1.7+ upstream chaining; e.g. socks5://[user:pass@]host:port)"
-		echo "  scan_mode           turbo/balanced/thorough/stealth/ironclad"
+		echo "  scan_mode           turbo/balanced/thorough/verified/stealth/ironclad (verified: v2.4+)"
 		echo "  ip_version          ipv4/ipv6/both"
 		echo "  obfuscation_profile firewall/gfw/balanced/aggressive/light/off"
 		echo "  http2_mode          0/1"
@@ -723,6 +1233,28 @@ do_set() {
 		echo "  tor_bind            ip:port (v2.0.0+)"
 		echo "  tor_dir             state directory path (v2.0.0+)"
 		echo "  tor_bridges         auto/on/off (v2.0.0+)"
+		echo "  tor_relays          auto/only/off or count (v2.1.0+)"
+		echo "  tor_relay_ports     web/any (v2.1.0+)"
+		echo "  tor_bridge_file     absolute path to torrc-style bridges (v2.1.0+; 'auto' clears)"
+		echo "  tor_http            ip:port HTTP CONNECT for Tor (v2.1.0+; 'auto' clears)"
+		echo "  exit_loc            !IR,AZ,RU or DE,SE (v2.1.0+; off/auto clears)"
+		echo "  exit_loc_secs       recheck interval (v2.1.0+; default 60)"
+		echo "  psiphon_mode        off/tunnel/reverse/only (v2.1.0+)"
+		echo "  psiphon_bind        ip:port (v2.1.0+)"
+		echo "  psiphon_http        ip:port HTTP CONNECT for Psiphon (v2.1.0+; 'auto' clears)"
+		echo "  psiphon_front       auto/cdn/direct (v2.1.0+)"
+		echo "  psiphon_region      two-letter country (v2.1.0+; 'auto' clears)"
+		echo "  psiphon_dir         state directory path (v2.1.0+)"
+		echo "  stats               0/1 (v2.1.0+ syslog traffic/uptime)"
+		echo "  stats_secs          stats log interval (v2.1.0+; default 60)"
+		echo "  gool_mode           modern/classic (v2.3+; modern = WireGuard inside MASQUE)"
+		echo "  gool_peer           ip:port modern gool MASQUE hop (v2.3+; 'auto' clears)"
+		echo "  tls_verify          1/0 gateway certificate pinning (v2.3+; 0 disables, auto = default)"
+		echo "  ech_dns|ech_domain  ECH resolver (udp://, tcp:// or https:// URL) / domain (v2.3+; 'auto' clears)"
+		echo "  masque_sni          MASQUE TLS SNI name (v2.4+; 'auto' clears)"
+		echo "  api_address         WARP API ip[:port] or name (v2.4+; 'auto' clears)"
+		echo "  api_host|api_sni    WARP API Host header / TLS SNI (v2.4+; 'auto' clears)"
+		echo "  tls_ciphers ...     TLS fingerprint tuning (v2.4+; see CLIENT-GUIDE)"
 		echo "  command_mode        generated/manual (custom core command line)"
 		echo "  custom_command      manual arguments, space-separated ('auto' clears)"
 		return 1
@@ -760,6 +1292,30 @@ do_set() {
 				;;
 		esac
 	fi
+	if [ -n "$installed_version" ] && ! core_supports_v21 "$installed_version"; then
+		case "$key" in
+			exit_loc|exit_loc_secs|stats|stats_secs|psiphon_mode|psiphon_bind|psiphon_http|psiphon_front|psiphon_region|psiphon_dir|tor_relays|tor_relay_ports|tor_bridge_file|tor_http)
+				log_err "$key requires Aether core v2.1.0 or newer"
+				return 1
+				;;
+		esac
+	fi
+	if [ -n "$installed_version" ] && ! core_supports_v23 "$installed_version"; then
+		case "$key" in
+			gool_mode|gool_peer|tls_verify|ech_dns|ech_domain)
+				log_err "$key requires Aether core v2.3.0 or newer"
+				return 1
+				;;
+		esac
+	fi
+	if [ -n "$installed_version" ] && ! core_supports_v24 "$installed_version"; then
+		case "$key" in
+			masque_sni|api_address|api_host|api_sni|tls_ciphers|tls13_ciphers|tls_groups|tls_key_shares|tls_sigalgs|tls_cert_compression|tls_alps|tls_trust_anchors|tls_server_padding|disable_grease|enable_grease_sigalgs|enable_ech_grease|disable_ocsp_stapling|disable_sct|disable_session_ticket|disable_extension_permutation)
+				log_err "$key requires Aether core v2.4.0 or newer"
+				return 1
+				;;
+		esac
+	fi
 
 	case "$key" in
 		enabled)
@@ -778,24 +1334,135 @@ do_set() {
 					} ;;
 				*) log_err "Invalid protocol: $value (use masque/wg/gool/mim)"; return 1 ;;
 			esac
-			if [ "$value" != "masque" ]; then
+			if ! reverse_protocol_ok "$value"; then
 				proto_tor=$(uci_get tor_mode)
 				if [ "$proto_tor" = "reverse" ]; then
-					log_err "Tor reverse mode requires protocol masque (tor_mode=reverse is set). Change tor_mode first or use protocol masque."
+					log_err "Tor reverse mode requires protocol masque, mim, or gool with core v2.3+ in modern mode (tor_mode=reverse is set). Change tor_mode first."
+					return 1
+				fi
+				proto_psiphon=$(uci_get psiphon_mode)
+				if [ "$proto_psiphon" = "reverse" ]; then
+					log_err "Psiphon reverse mode requires protocol masque, mim, or gool with core v2.3+ in modern mode (psiphon_mode=reverse is set). Change psiphon_mode first."
 					return 1
 				fi
 			fi ;;
+		gool_mode)
+			case "$value" in
+				modern|classic) ;;
+				auto) value="" ;;
+				*) log_err "Invalid gool_mode: $value (use modern/classic; auto clears)"; return 1 ;;
+			esac
+			if [ "$value" = "classic" ]; then
+				if [ "$(uci_get tor_mode)" = "reverse" ] || [ "$(uci_get psiphon_mode)" = "reverse" ]; then
+					log_err "Classic gool cannot carry reverse Tor/Psiphon. Change tor_mode/psiphon_mode first."
+					return 1
+				fi
+			fi ;;
+		gool_peer)
+			case "$value" in
+				auto) value="" ;;
+				*) valid_hostport "$value" || { log_err "Invalid gool_peer: $value (use ip:port or auto)"; return 1; } ;;
+			esac ;;
+		masque_sni)
+			case "$value" in
+				auto) value="" ;;
+				*) valid_domain "$value" || { log_err "Invalid masque_sni: $value (use a DNS name, not an IP; auto clears)"; return 1; } ;;
+			esac ;;
+		api_address)
+			case "$value" in
+				auto) value="" ;;
+				*) valid_api_address "$value" || { log_err "Invalid api_address: $value (use ip, name, ip:port or [ipv6]:port; auto clears)"; return 1; } ;;
+			esac ;;
+		api_host|api_sni|ech_domain)
+			case "$value" in
+				auto) value="" ;;
+				*) valid_domain "$value" || { log_err "Invalid $key: $value (use a DNS name; auto clears)"; return 1; } ;;
+			esac ;;
+		ech_dns)
+			case "$value" in
+				auto) value="" ;;
+				udp://?*|tcp://?*|https://?*)
+					case "$value" in *[![:graph:]]*) log_err "Invalid ech_dns: no spaces allowed"; return 1 ;; esac ;;
+				*) log_err "Invalid ech_dns: $value (core v2.4 needs udp://host[:port], tcp://host[:port] or https://host/path; auto clears)"; return 1 ;;
+			esac ;;
+		tls_verify)
+			case "$value" in
+				auto) value="" ;;
+				0|1) ;;
+				on|yes) value=1 ;;
+				off|no) value=0 ;;
+				*) log_err "Invalid tls_verify: $value (use 1 force on, 0 disable pinning, auto = core default)"; return 1 ;;
+			esac ;;
+		tls_alps)
+			case "$value" in
+				auto) value="" ;;
+				new|old) ;;
+				*) log_err "Invalid tls_alps: $value (use new/old; auto clears)"; return 1 ;;
+			esac ;;
+		tls_server_padding)
+			case "$value" in
+				auto) value="" ;;
+				*)
+					valid_tls_padding "$value" || {
+						log_err "Invalid tls_server_padding: $value (a number of bytes from 0 to 65535; auto clears)"
+						return 1
+					} ;;
+			esac ;;
+		tls_cert_compression)
+			case "$value" in
+				auto) value="" ;;
+				*)
+					valid_tls_list "$value" compression || {
+						log_err "Invalid tls_cert_compression: $value (zlib/brotli/zstd separated by ':'; auto clears)"
+						return 1
+					} ;;
+			esac ;;
+		tls_ciphers|tls13_ciphers|tls_groups|tls_key_shares|tls_sigalgs)
+			case "$value" in
+				auto) value="" ;;
+				*)
+					case "$key" in
+						tls_ciphers|tls13_ciphers) tls_kind=ciphers ;;
+						tls_sigalgs) tls_kind=sigalgs ;;
+						*) tls_kind=groups ;;
+					esac
+					valid_tls_list "$value" "$tls_kind" || {
+						log_err "Invalid $key: $value (TLS names separated by ':', no spaces; auto clears)"
+						return 1
+					} ;;
+			esac ;;
+		tls_trust_anchors)
+			case "$value" in
+				auto) value="" ;;
+				*)
+					valid_tls_list "$value" trustanchors || {
+						log_err "Invalid tls_trust_anchors: $value (dotted OIDs separated by ':', e.g. 11129.9.1:11129.9.4; auto clears)"
+						return 1
+					} ;;
+			esac ;;
+		disable_grease|enable_grease_sigalgs|enable_ech_grease|disable_ocsp_stapling|disable_sct|disable_session_ticket|disable_extension_permutation)
+			case "$value" in
+				0|1) ;;
+				on|yes) value=1 ;;
+				off|no) value=0 ;;
+				*) log_err "Invalid value for $key: $value (use 0/1)"; return 1 ;;
+			esac ;;
 		scan_mode)
 			case "$value" in
 				turbo|balanced|thorough|stealth|ironclad) ;;
-				*) log_err "Invalid scan_mode: $value (use turbo/balanced/thorough/stealth/ironclad)"; return 1 ;;
+				verified)
+					[ -n "$installed_version" ] && core_supports_v24 "$installed_version" || {
+						log_err "scan_mode verified requires Aether core v2.4.0 or newer (use stealth on older cores)"
+						return 1
+					} ;;
+				*) log_err "Invalid scan_mode: $value (use turbo/balanced/thorough/verified/stealth/ironclad)"; return 1 ;;
 			esac ;;
 		ip_version)
 			case "$value" in
 				ipv4|ipv6|both) ;;
 				*) log_err "Invalid ip_version: $value (use ipv4/ipv6/both)"; return 1 ;;
 			esac ;;
-		http2_mode|fragment_tls|quick_reconnect|no_data_check|no_profile_retry|gateway|watchdog_enabled|quic_v2)
+		http2_mode|fragment_tls|quick_reconnect|no_data_check|no_profile_retry|gateway|watchdog_enabled|quic_v2|stats)
 			case "$value" in
 				0|1|on|off|yes|no)
 					case "$value" in
@@ -834,8 +1501,15 @@ do_set() {
 			case "$value" in off|tunnel|reverse|only) ;; *) log_err "Invalid tor_mode: use off/tunnel/reverse/only"; return 1 ;; esac
 			if [ "$value" = "reverse" ]; then
 				tor_proto=$(uci_get protocol)
-				if [ "${tor_proto:-masque}" != "masque" ]; then
-					log_err "Tor reverse mode requires protocol masque (current: $tor_proto). Set protocol first: aether-ctl set protocol masque"
+				if ! reverse_protocol_ok "$tor_proto"; then
+					log_err "Tor reverse mode requires protocol masque, mim, or modern gool on core v2.3+ (current: ${tor_proto:-masque}). Set protocol first: aether-ctl set protocol masque"
+					return 1
+				fi
+			fi
+			if [ "$value" = "only" ]; then
+				proto_psiphon=$(uci_get psiphon_mode)
+				if [ "$proto_psiphon" = "only" ]; then
+					log_err "tor_mode=only cannot be combined with psiphon_mode=only"
 					return 1
 				fi
 			fi ;;
@@ -851,15 +1525,93 @@ do_set() {
 			esac ;;
 		tor_bridges)
 			case "$value" in auto|on|off) ;; *) log_err "Invalid tor_bridges: use auto/on/off"; return 1 ;; esac ;;
+		tor_relays)
+			case "$value" in
+				auto|only|off) ;;
+				*[!0-9]*) log_err "Invalid tor_relays: use auto/only/off or a count"; return 1 ;;
+			esac ;;
+		tor_relay_ports)
+			case "$value" in web|any) ;; *) log_err "Invalid tor_relay_ports: use web/any"; return 1 ;; esac ;;
+		tor_bridge_file)
+			case "$value" in
+				auto) value="" ;;
+				''|/*) ;;
+				*) log_err "Invalid tor_bridge_file: $value (use an absolute path or auto)"; return 1 ;;
+			esac ;;
+		tor_http)
+			case "$value" in
+				auto) value="" ;;
+				*.*:*) ;;
+				*) log_err "Invalid tor_http: $value (use ip:port or auto)"; return 1 ;;
+			esac ;;
+		exit_loc)
+			valid_exit_loc "$value" || {
+				log_err "Invalid exit_loc: $value (use !IR,AZ,RU or DE,SE; off disables the policy)"
+				return 1
+			}
+			value="$(normalize_exit_loc "$value")" ;;
+		psiphon_mode)
+			case "$value" in off|tunnel|reverse|only) ;; *) log_err "Invalid psiphon_mode: use off/tunnel/reverse/only"; return 1 ;; esac
+			if [ "$value" = "reverse" ]; then
+				psiphon_proto=$(uci_get protocol)
+				if ! reverse_protocol_ok "$psiphon_proto"; then
+					log_err "Psiphon reverse mode requires protocol masque, mim, or modern gool on core v2.3+ (current: ${psiphon_proto:-masque}). Set protocol first: aether-ctl set protocol masque"
+					return 1
+				fi
+			fi
+			if [ "$value" = "only" ]; then
+				proto_tor=$(uci_get tor_mode)
+				if [ "$proto_tor" = "only" ]; then
+					log_err "psiphon_mode=only cannot be combined with tor_mode=only"
+					return 1
+				fi
+			fi ;;
+		psiphon_bind)
+			case "$value" in
+				*.*:*) ;;
+				*) log_err "Invalid psiphon_bind: $value (use ip:port)"; return 1 ;;
+			esac ;;
+		psiphon_http)
+			case "$value" in
+				auto) value="" ;;
+				*.*:*) ;;
+				*) log_err "Invalid psiphon_http: $value (use ip:port or auto)"; return 1 ;;
+			esac ;;
+		psiphon_front)
+			case "$value" in auto|cdn|direct) ;; *) log_err "Invalid psiphon_front: use auto/cdn/direct"; return 1 ;; esac ;;
+		psiphon_region)
+			case "$value" in
+				auto) value="" ;;
+				[A-Za-z][A-Za-z])
+					value="$(echo "$value" | tr 'a-z' 'A-Z')" ;;
+				*) log_err "Invalid psiphon_region: $value (use a two-letter country code or auto)"; return 1 ;;
+			esac ;;
+		psiphon_dir)
+			case "$value" in
+				auto) value="" ;;
+				''|/*) ;;
+				*) log_err "Invalid psiphon_dir: $value (use an absolute path or auto)"; return 1 ;;
+			esac ;;
 		command_mode)
 			case "$value" in generated|manual) ;; *) log_err "Invalid command_mode: use generated/manual"; return 1 ;; esac ;;
 		custom_command)
-			case "$value" in auto) value="" ;; '') log_err "Empty custom_command: use 'auto' to clear"; return 1 ;; esac ;;
-		keepalive|reconnect_secs|validate_secs|startup_secs|watchdog_interval|watchdog_failures|watchdog_startup_grace|watchdog_cooldown)
+			case "$value" in auto) value="" ;; esac ;;
+		keepalive|reconnect_secs|validate_secs|startup_secs|watchdog_interval|watchdog_failures|watchdog_startup_grace|watchdog_cooldown|exit_loc_secs|stats_secs)
 			case "$value" in
 				''|*[!0-9]*) log_err "Invalid numeric value: $value"; return 1 ;;
 			esac ;;
-		socks_listen|http_proxy|upstream_proxy|obfuscation_profile|h2_peer|fragment_size|fragment_delay|peer|log_level|team|access_id|access_secret|access_token) ;;
+		upstream_proxy)
+			case "$value" in
+				auto) value="" ;;
+				*)
+					# Core v2.4 exits when --upstream cannot be dialled, so reject
+					# malformed values now instead of leaving a crash loop.
+					valid_upstream "$value" || {
+						log_err "Invalid upstream_proxy (use [socks5|socks5h|http://][user:pass@]host:port; auto clears)"
+						return 1
+					} ;;
+			esac ;;
+		socks_listen|http_proxy|obfuscation_profile|h2_peer|fragment_size|fragment_delay|peer|log_level|team|access_id|access_secret|access_token) ;;
 		*)
 			log_err "Unknown configuration option: $key"
 			return 1
@@ -879,6 +1631,8 @@ do_set() {
 		log_info "Set $key = (redacted)"
 	elif [ "$key" = "upstream_proxy" ]; then
 		log_info "Set $key = $(redact_url "$value")"
+	elif [ "$key" = "exit_loc" ] && [ "$value" = "off" ]; then
+		log_info "Set exit_loc = off (exit-location policy disabled)"
 	else
 		log_info "Set $key = $value"
 	fi
@@ -1255,11 +2009,13 @@ case "${1:-}" in
 	stop)     do_stop ;;
 	restart)  do_restart ;;
 	status)   do_status ;;
+	register) do_register "$2" ;;
 	show)     do_show ;;
 	set)      do_set "$2" "$3" ;;
 	test)     do_test "$2" ;;
 	check-ip|ip) do_check_ip ;;
 	check-tor|tor-ip) do_check_tor ;;
+	check-psiphon|psiphon-ip) do_check_psiphon ;;
 	log)      do_log "$2" ;;
 	passwall) shift; do_passwall "$@" ;;
 	version)  shift; do_version "$@" ;;
@@ -1277,11 +2033,13 @@ case "${1:-}" in
 		echo "  restart         Restart Aether tunnel"
 		echo "  status          Show running status and config"
 		echo "  show            Show current configuration"
+		echo "  register [which]  Register WARP identities and exit (v2.3+): masque|wg|gool|gool-classic|mim|all"
 		echo "  set <opt> <val> Change a configuration option (bare 'set' lists options)"
 		echo "  test <host>     Test connection through the tunnel"
 		echo "  check-ip        Check public IP address, country, and ping"
 		echo "  ip              Alias for check-ip"
 		echo "  check-tor       Check Tor exit IP and IsTor status (v2.0.0+)"
+		echo "  check-psiphon   Check Psiphon exit IP (v2.1.0+)"
 		echo "  log [lines]     Show Aether logs (default 50 lines)"
 		echo "  passwall <cmd>  Passwall2 bridge: status | localhost on|off | add-node"
 		echo "  version [change <tag> [opts]]  Show or change the Aether core version"
@@ -1299,6 +2057,9 @@ case "${1:-}" in
 		echo "  aether-ctl test google.com"
 		echo "  aether-ctl check-ip"
 		echo "  aether-ctl check-tor"
+		echo "  aether-ctl check-psiphon"
+		echo "  aether-ctl set exit_loc '!IR'"
+		echo "  aether-ctl set psiphon_mode tunnel"
 		echo "  aether-ctl passwall status"
 		echo "  aether-ctl passwall localhost off"
 		echo "  aether-ctl passwall add-node"
