@@ -129,7 +129,7 @@ cmd_status() {
 	[ -z "$endpoint" ] && endpoint=$(echo "$logs" | grep -o 'candidate ok [0-9.]*:[0-9]*' | tail -1 | awk '{print $3}')
 
 	transport=$(echo "$logs" | grep -o 'MASQUE transport: [^ ]*' | tail -1 | sed 's/MASQUE transport: //')
-	socks_addr=$(echo "$logs" | grep -o 'socks5 listening on [^ ]*' | tail -1 | sed 's/socks5 listening on //')
+	socks_addr=$(echo "$logs" | grep -o 'socks5 \(server \)\{0,1\}listening on [^ ]*' | tail -1 | sed 's/.*listening on //')
 	obfuscation=$(echo "$logs" | grep -o 'obfuscation profile: [a-z]*' | tail -1 | sed 's/obfuscation profile: //')
 	identity=$(echo "$logs" | grep -o 'device=[^ ]*' | tail -1 | sed 's/device=//')
 

@@ -4,7 +4,7 @@
 
 # Aether OpenWrt Client
 
-**نسخه کلاینت: v0.8.0**
+**نسخه کلاینت: v0.10.0**
 
 اینتگریشن OpenWrt برای [Aether](https://github.com/CluvexStudio/Aether) — یک کلاینت دور زدن سانسور.
 
@@ -26,7 +26,7 @@ wget -qO /tmp/aether-install.sh https://raw.githubusercontent.com/moein8668-git/
 در حین نصب از شما پرسیده می‌شود:
 
 - **نسخه هسته Aether**: حداکثر پنج ریلیز پایدار از v1.5.0 به بعد نمایش داده
-  می‌شود. با Enter نسخه پیش‌فرض v2.0.0 انتخاب می‌شود؛ می‌توانید یک گزینه یا
+  می‌شود. با Enter نسخه پیش‌فرض v2.4.0 انتخاب می‌شود؛ می‌توانید یک گزینه یا
   نسخه معتبر v1.5.0 به بعد را وارد کنید.
 - **curl نصب شود؟** به صورت پیش‌فرض **بله**. curl برای تست اتصال در LuCI و
   watchdog بازیابی تونل لازم است. با `--no-curl` از آن صرف‌نظر کنید؛ تونل کار
@@ -42,7 +42,7 @@ wget -qO /tmp/aether-install.sh https://raw.githubusercontent.com/moein8668-git/
 
 ## قابلیت‌ها
 
-- **CLI**: `aether-ctl start|stop|restart|status|show|log|test <host>|check-ip|check-tor` (با نام مستعار `tor-ip` و خروجی `Tor: true|false IP:`)، `aether-ctl change-version <vX.Y.Z>`، `aether-ctl passwall <…>`، گزینه‌های عملکرد/gool و تنظیمات MIM، QUIC v2، ECH و Tor در v2. `set` مقدارها را اعتبارسنجی می‌کند (`tor_bind` به شکل `ip:port`، `tor_dir` مطلق، و `reverse` فقط با MASQUE)؛ `status` و `show` تنظیم مؤثر را نیز نشان می‌دهند؛ مثلاً `balanced (stored firewall)`.
+- **CLI**: `aether-ctl start|stop|restart|status|show|log|test <host>|check-ip|check-tor` (با نام مستعار `tor-ip` و خروجی `Tor: true|false IP:`)، `aether-ctl change-version <vX.Y.Z>`، `aether-ctl passwall <…>`، گزینه‌های عملکرد/gool و تنظیمات MIM، QUIC v2، ECH و Tor در v2. `set` مقدارها را اعتبارسنجی می‌کند (`tor_bind` به شکل `ip:port`، `tor_dir` مطلق، و `reverse` فقط روی MASQUE/MIM یا gool مدرن)؛ `status` و `show` تنظیم مؤثر را نیز نشان می‌دهند؛ مثلاً `balanced (stored firewall)`.
 - **LuCI**: Services -> Aether
   - جدول وضعیت (وضعیت، نسخه، endpoint، transport، آدرس SOCKS5 و وضعیت پیکربندی Tor)
   - دکمه‌های Start / Stop / Restart
@@ -69,7 +69,7 @@ wget -qO /tmp/aether-install.sh https://raw.githubusercontent.com/moein8668-git/
 /tmp/aether-install.sh --force-config  # بازنویسی کانفیگ موجود
 /tmp/aether-install.sh --no-curl       # رد شدن از پرامپت نصب curl
 /tmp/aether-install.sh --version v1.5.0 --start
-/tmp/aether-install.sh --non-interactive --start  # نسخه v2.0.0 بدون پرامپت
+/tmp/aether-install.sh --non-interactive --start  # نسخه v2.4.0 بدون پرامپت
 ```
 
 ## حذف نصب
@@ -97,7 +97,7 @@ aether-ctl passwall status            # نمایش وضعیت Passwall2 و نو�
 aether-ctl passwall localhost off     # توقف پروکسی ترافیک خود روتر توسط Passwall2
 aether-ctl passwall add-node          # ساخت نود socks اشاره‌کننده به Aether
 aether-ctl version
-aether-ctl update                       # دریافت updater جدید کلاینت؛ پیش‌فرض هسته v2.0.0 باقی می‌ماند
+aether-ctl update                       # دریافت updater جدید کلاینت؛ پیش‌فرض هسته v2.4.0 باقی می‌ماند
 aether-ctl change-version v1.5.0 --start
 aether-ctl update --version v1.5.0 --start
 aether-ctl set tor_mode tunnel            # Tor از طریق WARP (نیازمند بسته Tor در v2.0.0+)
@@ -111,7 +111,7 @@ aether-ctl set custom_command '--bind 0.0.0.0:1819 --wg'  # آرگومان‌ه�
 دوباره اجرا می‌کند. کانفیگ `/etc/config/aether` و هویت‌های معتبر `/etc/aether`
 حفظ می‌شوند، مگر این‌که `--force-config` داده شود. فایل هسته همیشه با SHA-256
 ریلیز رسمی بررسی می‌شود. کلاینت از هسته v1.5.0 و جدیدتر پشتیبانی می‌کند و
-پیش‌فرض آن v2.0.0 است. پیش از شروع سرویس و پیش از رندر رابط LuCI، نسخه هسته
+پیش‌فرض آن v2.4.0 است. پیش از شروع سرویس و پیش از رندر رابط LuCI، نسخه هسته
 تشخیص داده می‌شود. در v1.5، گزینه‌های مخصوص v1.6 شامل HTTP CONNECT proxy،
 MASQUE startup deadline و کنترل سطح لاگ نمایش داده نشده و به هسته ارسال
 نمی‌شوند. نسخه‌های v1.6 پروفایل قابلیت v1.6 را دارند و نسخه‌های v1.7 زنجیره
@@ -127,6 +127,16 @@ UCI `wiw_outer` و `wiw_inner`؛ خالی = اسکن هر دو مرحله توس
 که با قابلیت Tor کامپایل شده باشد؛ کلاینت کنترل‌ها را بر اساس نسخه هسته نمایش
 می‌دهد، اما این قابلیت build را از پیش تشخیص نمی‌دهد.
 
+- **هسته v2.3.0 به بعد:** `--gool` اکنون **gool مدرن** (WireGuard داخل MASQUE) است و
+  حالت قدیمی WireGuard-در-WireGuard با `--gool-classic` انتخاب می‌شود. گزینهٔ جدید
+  `gool_mode` (`modern`/`classic`) بین این دو انتخاب می‌کند: نصب تازه روی `modern` است و
+  `install.sh` پیکربندی‌های gool موجود را روی `classic` نگه می‌دارد. همچنین دستور
+  `aether-ctl register` و گزینه‌های `tls_verify`، `ech_dns`، `ech_domain` اضافه شده‌اند.
+- **هسته v2.4.0 به بعد:** `masque_sni`، دسترسی به API وارپ (`api_address`/`api_host`/`api_sni`)،
+  تنظیم اثرانگشت TLS، اسکن `verified` (نام جدید `stealth`) و اعتبارسنجی سخت‌گیرانهٔ
+  `upstream_proxy` (هستهٔ 2.4 در صورت وصل‌نشدن upstream خارج می‌شود). اندازهٔ پیش‌فرض
+  fragment برابر `8-16` است. آمادگی سرویس باید از لاگ خوانده شود
+  (`masque tunnel validated` / `socks5 server listening on`)، نه از باز بودن پورت.
 ## رابط وب LuCI
 
 پس از نصب، رابط وب روتر خود را باز کنید -> **Services -> Aether**

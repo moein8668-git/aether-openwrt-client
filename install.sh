@@ -14,11 +14,11 @@
 #   --force-config   Overwrite existing /etc/config/aether
 #   --no-curl        Skip curl installation
 #   --version <tag>  Install a specific Aether core release (v1.5.0 or newer)
-#   --non-interactive  Do not prompt; defaults to v2.0.0
+#   --non-interactive  Do not prompt; defaults to v2.4.0
 
 # No set -e — we handle errors explicitly with || blocks and error() calls.
 umask 077
-CLIENT_VERSION="v0.8.0"
+CLIENT_VERSION="v0.10.0"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -47,6 +47,17 @@ select_perf_profile() {
         echo "medium"
     else
         echo "high"
+    fi
+}
+# A failed HTTPS fetch reads like a network outage, but a stale router clock is
+# the usual cause: every certificate then looks "not yet valid" or "expired".
+# Prints the extra lines to show in that case, nothing otherwise.
+https_hint_text() {
+    if grep -qiE 'certificate|not yet valid|not trusted|expired' "$1" 2>/dev/null; then
+        printf '%s\n' "The HTTPS certificate was rejected, which usually means the router clock is wrong"
+        printf '%s\n' "(certificates then look 'not yet valid' or 'expired'). Fix the time and retry:"
+        printf '%s\n' "  date -u MMDDhhmmCCYY    # e.g. date -u 102908002026"
+        printf '%s\n' "  or enable NTP: uci set system.ntp.enabled=1 && /etc/init.d/sysntpd restart"
     fi
 }
 # --- Parse arguments ---
@@ -112,7 +123,7 @@ esac
 
 REPO="CluvexStudio/Aether"
 API_URL="https://api.github.com/repos/${REPO}/releases?per_page=30"
-DEFAULT_VERSION="v2.0.0"
+DEFAULT_VERSION="v2.4.0"
 
 echo ""
 echo "========================================="
@@ -151,10 +162,21 @@ contains_tag() {
 }
 
 info "Fetching available releases from GitHub..."
-RELEASE_JSON=$(wget -4 -T 30 -qO- "$API_URL" 2>/dev/null) || {
+# No -q here: wget -q suppresses its own error text, and that text is what tells
+# a stale clock (certificate rejected) apart from a real network outage. Both the
+# progress bar and the errors go to stderr, which is captured, so a successful
+# run stays quiet.
+FETCH_ERR="/tmp/aether-fetch.$$.err"
+RELEASE_JSON=$(wget -4 -T 30 -O- "$API_URL" 2>"$FETCH_ERR") || {
     error "Failed to reach GitHub API. Check internet connection."
+    HTTPS_HINT=$(https_hint_text "$FETCH_ERR")
+    if [ -n "$HTTPS_HINT" ]; then
+        printf '%s\n' "$HTTPS_HINT" | while IFS= read -r hint_line; do error "$hint_line"; done
+    fi
+    rm -f "$FETCH_ERR"
     exit 1
 }
+rm -f "$FETCH_ERR"
 
 # The GitHub response is compact JSON. Split release objects, retain only
 # published stable releases, and use API order (newest first).
@@ -273,9 +295,12 @@ if [ -z "$BINARY" ] || [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
-# Core v2 Tor-enabled archives also carry the lyrebird pluggable transport.
-# Keep it beside the core binary: Arti discovers the helper under /usr/bin/pt.
+# Core v2 archives carry pluggable transports under pt/ (lyrebird, and on
+# v2.1+ the Psiphon console client). Keep the whole tree beside the binary.
+PT_DIR=$(find "$TMP_DIR" -type d -name pt | head -n1)
 PT_BINARY=$(find "$TMP_DIR" -type f -path "*/pt/lyrebird" | head -n1)
+# Release archives also ship third-party licences next to the binary.
+LICENSES_DIR=$(find "$TMP_DIR" -type d -name LICENSES | head -n1)
 
 chmod +x "$BINARY"
 success "Binary: $($BINARY --version 2>&1)"
@@ -376,7 +401,28 @@ cp -f "$BINARY" /usr/bin/aether && chmod 755 /usr/bin/aether || {
 }
 success "Installed /usr/bin/aether"
 
-if [ -n "$PT_BINARY" ] && [ -f "$PT_BINARY" ]; then
+if [ -n "$PT_DIR" ] && [ -d "$PT_DIR" ]; then
+    mkdir -p /usr/bin/pt || {
+        error "Failed to create /usr/bin/pt for pluggable transports"
+        exit 1
+    }
+    pt_installed=0
+    for pt_src in "$PT_DIR"/*; do
+        [ -f "$pt_src" ] || continue
+        pt_name="${pt_src##*/}"
+        cp -f "$pt_src" "/usr/bin/pt/$pt_name" &&
+            chmod 755 "/usr/bin/pt/$pt_name" || {
+            error "Failed to install /usr/bin/pt/$pt_name"
+            exit 1
+        }
+        success "Installed /usr/bin/pt/$pt_name"
+        pt_installed=1
+    done
+    [ "$pt_installed" -eq 1 ] || {
+        error "pt/ directory was empty"
+        exit 1
+    }
+elif [ -n "$PT_BINARY" ] && [ -f "$PT_BINARY" ]; then
     mkdir -p /usr/bin/pt || {
         error "Failed to create /usr/bin/pt for the Tor pluggable transport"
         exit 1
@@ -389,6 +435,16 @@ if [ -n "$PT_BINARY" ] && [ -f "$PT_BINARY" ]; then
     success "Installed /usr/bin/pt/lyrebird"
 fi
 
+if [ -n "$LICENSES_DIR" ] && [ -d "$LICENSES_DIR" ]; then
+    rm -rf /usr/share/aether/LICENSES 2>/dev/null
+    mkdir -p /usr/share/aether/LICENSES &&
+        cp -f "$LICENSES_DIR"/* /usr/share/aether/LICENSES/ 2>/dev/null &&
+        chmod 755 /usr/share/aether /usr/share/aether/LICENSES &&
+        chmod 644 /usr/share/aether/LICENSES/* &&
+        success "Installed third-party licences to /usr/share/aether/LICENSES" ||
+        warn "Could not install third-party licences"
+fi
+
 if [ -f /etc/config/aether ] && [ "$FORCE_CONFIG" -eq 0 ]; then
     warn "Keeping existing /etc/config/aether"
     existing_perf="$(uci -q get aether.main.perf_profile 2>/dev/null)"
@@ -397,6 +453,26 @@ if [ -f /etc/config/aether ] && [ "$FORCE_CONFIG" -eq 0 ]; then
         uci set aether.main.perf_profile="$detected_perf" 2>/dev/null &&
             uci commit aether 2>/dev/null &&
             info "Initialized perf_profile = $detected_perf (auto-detected from RAM)"
+    fi
+    if ! uci -q show aether.main.exit_loc >/dev/null 2>&1; then
+        uci set aether.main.exit_loc=!IR 2>/dev/null &&
+            uci commit aether 2>/dev/null &&
+            info "Initialized exit_loc = !IR (refuse Iranian WARP exits)"
+    fi
+    # Core v2.3 made --gool the modern WireGuard-inside-MASQUE transport. A
+    # config written before that meant the classic WireGuard-in-WireGuard hop
+    # pair, so keep it on classic; everything else starts on modern.
+    if ! uci -q show aether.main.gool_mode >/dev/null 2>&1; then
+        existing_proto="$(uci -q get aether.main.protocol 2>/dev/null)"
+        existing_wiw="$(uci -q get aether.main.wiw_outer 2>/dev/null)$(uci -q get aether.main.wiw_inner 2>/dev/null)"
+        if [ "$existing_proto" = "gool" ] || [ -n "$existing_wiw" ]; then
+            new_gool_mode=classic
+        else
+            new_gool_mode=modern
+        fi
+        uci set aether.main.gool_mode=$new_gool_mode 2>/dev/null &&
+            uci commit aether 2>/dev/null &&
+            info "Initialized gool_mode = $new_gool_mode"
     fi
 else
     install_staged "etc/config/aether" 600 || exit 1
@@ -441,9 +517,15 @@ for legacy in /aether*.toml /root/aether*.toml; do
         warn "Leaving duplicate legacy identity in place: $legacy"
     fi
 done
-# Migrate: remove empty/invalid stubs left by older installers
-for f in /etc/aether/aether.toml /etc/aether/aether-secondary.toml; do
-    if [ -f "$f" ] && ! grep -q 'device_id' "$f" 2>/dev/null; then
+# Migrate: remove empty/invalid identity stubs left by older installers.
+# *-lastconn.toml is the core's last-working-gateway cache and has no device_id
+# by design; keep it so the first start after an upgrade can quick-reconnect.
+for f in /etc/aether/*.toml; do
+    [ -f "$f" ] || continue
+    case "$f" in
+        *-lastconn.toml) continue ;;
+    esac
+    if ! grep -q 'device_id' "$f" 2>/dev/null; then
         warn "Removing invalid identity stub: $f"
         rm -f "$f"
     fi

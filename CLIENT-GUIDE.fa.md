@@ -162,7 +162,40 @@ firewall mark و گروه‌های TLS key-share عمداً توسط این کل
 ابزارهای پروکسی شفاف مانند Passwall2 روی همان روتر تقسیم ترافیک را بهتر انجام
 می‌دهند و باقی کنترل‌ها روی پیش‌فرض هسته می‌مانند.
 
-## endpointهای gool دو مرحله‌ای (هسته v1.9+)
+## gool مدرن، register و گزینه‌های API (هسته v2.3 / v2.4)
+
+- **gool Flavor** (هسته v2.3+): حالت `modern` یعنی WireGuard داخل تونل MASQUE
+  (پیش‌فرض هسته از 2.3) و حالت `classic` همان WireGuard-در-WireGuard قدیمی است.
+  نصب‌های قبلیِ gool توسط نصاب روی `classic` می‌مانند تا رفتارشان عوض نشود.
+  gool مدرن گزینه‌های MASQUE (HTTP/2، fragmentation، ECH، SNI) و `gool_peer` را
+  می‌پذیرد و Tor/Psiphon معکوس (reverse) را هم حمل می‌کند. فیلدهای دو مرحله‌ای
+  `wiw_*` فقط برای gool کلاسیک هستند.
+- **Register** (هسته v2.3+): دستور `aether-ctl register [masque|wg|gool|gool-classic|mim|all]`
+  هویت‌های WARP را بدون راه‌اندازی تونل ثبت می‌کند. اول سرویس را متوقف کنید.
+  هسته در صورت نبودن هویت خودش هم ثبت می‌کند، پس این دستور اختیاری است؛ برای
+  پیش‌ثبت‌نام یا جدا کردن خطای ثبت‌نام از خطای تونل مفید است.
+- **تایید گواهی گیت‌وی** (`tls_verify`): هسته با `team` به‌صورت پیش‌فرض گواهی گیت‌وی
+  را pin می‌کند. مقدار `0` آن را خاموش می‌کند (از طریق متغیر محیطی `AETHER_TLS_VERIFY`،
+  نه فلگ) و `1` اجبارش می‌کند.
+- **`ech_dns` و `ech_domain`** (هسته v2.3+): فقط وقتی ECH تنظیم باشد استفاده می‌شوند. مقدار `ech_dns` باید URL باشد (`udp://1.1.1.1:53` یا `tcp://...` یا `https://1.1.1.1/dns-query`)؛ IP خالی باعث توقف هسته می‌شود.
+- **`masque_sni`** (هسته v2.4+): نام TLS که به گیت‌وی MASQUE فرستاده می‌شود (پیش‌فرض
+  هسته `www.cloudflare.com`)؛ باید نام دامنه باشد، نه IP.
+- **API وارپ** (`api_address`، `api_host`، `api_sni`؛ هسته v2.4+): مسیر و نام‌هایی که
+  درخواست‌های ثبت‌نام با آن‌ها ارسال می‌شود. خالی بگذارید تا زنجیرهٔ پیش‌فرض هسته کار کند.
+- **تنظیم اثرانگشت TLS** (هسته v2.4+): `tls_ciphers`، `tls13_ciphers`، `tls_groups`،
+  `tls_key_shares`، `tls_sigalgs`، `tls_cert_compression`، `tls_alps`،
+  `tls_trust_anchors`، `tls_server_padding` و کلیدهای `disable_grease`،
+  `enable_grease_sigalgs`، `enable_ech_grease`، `disable_ocsp_stapling`،
+  `disable_sct`، `disable_session_ticket`، `disable_extension_permutation`.
+  همه به‌صورت پیش‌فرض خاموش‌اند؛ مقدار اشتباه می‌تواند تونل را خراب کند.
+- **اسکن verified** (`scan_mode=verified`، هسته v2.4+): همان اسکن آرام که قبلاً `stealth` بود.
+- **`upstream_proxy`** اعتبارسنجی می‌شود (`[socks5|socks5h|http://][user:pass@]host:port`).
+  هستهٔ 2.4 اگر نتواند upstream را وصل کند خارج می‌شود.
+- **آماده‌بودن سرویس**: در هستهٔ v2.4 پورت SOCKS5 از همان ابتدا باز است و کلاینت‌ها تا
+  اعتبارسنجی تونل منتظر می‌مانند؛ به `aether-ctl status` و `log` نگاه کنید، نه فقط پورت.
+- **اندازهٔ fragment** اکنون پیش‌فرض `8-16` است و در v2.4 گزینهٔ `fragment_tls` درخواست‌های
+  API وارپ را هم برای WireGuard و gool کلاسیک fragment می‌کند.
+
 
 هسته v1.9 امکان تعیین مستقل هر یک از دو مرحله WARP-in-WARP را می‌دهد. در LuCI
 فیلدهای **gool Outer Hop** / **gool Inner Hop** هنگام انتخاب پروتکل `gool`
@@ -190,15 +223,16 @@ Tor با `tor_mode` در دسترس است:
 
 - `tunnel` شنونده SOCKS5 معمول WARP را نگه می‌دارد و یک شنونده Tor اضافه می‌کند؛
   ترافیک Tor از WARP عبور می‌کند.
-- `reverse` به MASQUE از مسیر Tor می‌رسد و با WARP خارج می‌شود؛ به MASQUE و
-  HTTP/2 نیاز دارد.
+- `reverse` به MASQUE از مسیر Tor می‌رسد و با WARP خارج می‌شود؛ به یک حامل سمت
+  MASQUE (MASQUE، MIM یا gool مدرن) روی HTTP/2 نیاز دارد.
 - `only` Tor را روی شنونده SOCKS5 اصلی ارائه می‌کند و تونل WARP برقرار نمی‌شود.
 
 این کنترل‌ها فقط در هسته v2 ظاهر می‌شوند و به بسته هسته‌ای نیاز دارند که با
 قابلیت Tor و transportهای افزونه لازم ساخته شده باشد. کلاینت کنترل‌ها را بر پایه
 نسخه نمایش می‌دهد و وجود قابلیت Tor در build نصب‌شده را از پیش بررسی نمی‌کند.
-`reverse` فقط با پروتکل MASQUE مجاز است و CLI تغییر ناسازگار را در هر دو جهت رد
-می‌کند.
+`reverse` به یک حامل سمت MASQUE نیاز دارد — MASQUE، MIM یا gool مدرن (هسته
+v2.3+). WireGuard و gool کلاسیک رد می‌شوند، چون تونل از روی Tor برقرار می‌شود و
+Tor فقط TCP را حمل می‌کند؛ CLI تغییر ناسازگار را در هر دو جهت رد می‌کند.
 
 پنل Status وضعیت پیکربندی‌شده `Tor` را نشان می‌دهد (`Enabled at <bind>`،
 `Disabled` یا `Needs core v2.0+`)؛ این وضعیت به‌تنهایی نشانه bootstrap موفق Tor
@@ -239,9 +273,9 @@ state را وقتی والدهای آن root-owned نباشند یا برای گ
 حالت Manual همه گزینه‌های UCI، از جمله پروتکل، Tor و bindها را دور می‌زند.
 `test`، `check-ip` و `check-tor` به‌جای UCI، bindهای فرمان دستی را می‌خوانند.
 CLI مقدارها را پیش از ذخیره اعتبارسنجی می‌کند (`tor_bind` به شکل `ip:port`،
-`tor_dir` مسیر مطلق، و `reverse` فقط با MASQUE) و `status`/`show` پروفایل
-obfuscation مؤثر را نشان می‌دهند؛ مثلاً `balanced (stored firewall)` وقتی مقدار
-ذخیره‌شده برای خانواده پروتکل remap شده است.
+`tor_dir` مسیر مطلق، و `reverse` فقط روی MASQUE/MIM یا gool مدرن) و `status`/`show`
+پروفایل obfuscation مؤثر را نشان می‌دهند؛ مثلاً `balanced (stored firewall)` وقتی
+مقدار ذخیره‌شده برای خانواده پروتکل remap شده است.
 
 ## دستورات CLI
 
@@ -298,7 +332,7 @@ chmod +x /tmp/aether-install.sh
 ```
 
 نصب‌کننده حداکثر پنج نسخه پایدار هسته از v1.5.0 به بعد را نمایش می‌دهد و
-پیش‌فرض آن v2.0.0 است. برای automation از `--non-interactive` استفاده کنید و
+پیش‌فرض آن v2.4.0 است. برای automation از `--non-interactive` استفاده کنید و
 برای نسخه مشخص v1.5.0 به بعد `--version vX.Y.Z` را بدهید. دستور
 `aether-ctl update` آخرین updater ریپو را دریافت کرده و همین فرآیند نصب را
 اجرا می‌کند؛ `aether-ctl change-version vX.Y.Z` میانبر مشخص برای تغییر نسخه
