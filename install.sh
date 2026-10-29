@@ -49,6 +49,17 @@ select_perf_profile() {
         echo "high"
     fi
 }
+# A failed HTTPS fetch reads like a network outage, but a stale router clock is
+# the usual cause: every certificate then looks "not yet valid" or "expired".
+# Prints the extra lines to show in that case, nothing otherwise.
+https_hint_text() {
+    if grep -qiE 'certificate|not yet valid|not trusted|expired' "$1" 2>/dev/null; then
+        printf '%s\n' "The HTTPS certificate was rejected, which usually means the router clock is wrong"
+        printf '%s\n' "(certificates then look 'not yet valid' or 'expired'). Fix the time and retry:"
+        printf '%s\n' "  date -u MMDDhhmmCCYY    # e.g. date -u 102908002026"
+        printf '%s\n' "  or enable NTP: uci set system.ntp.enabled=1 && /etc/init.d/sysntpd restart"
+    fi
+}
 # --- Parse arguments ---
 START_NOW=0
 FORCE_CONFIG=0
@@ -151,10 +162,21 @@ contains_tag() {
 }
 
 info "Fetching available releases from GitHub..."
-RELEASE_JSON=$(wget -4 -T 30 -qO- "$API_URL" 2>/dev/null) || {
+# No -q here: wget -q suppresses its own error text, and that text is what tells
+# a stale clock (certificate rejected) apart from a real network outage. Both the
+# progress bar and the errors go to stderr, which is captured, so a successful
+# run stays quiet.
+FETCH_ERR="/tmp/aether-fetch.$$.err"
+RELEASE_JSON=$(wget -4 -T 30 -O- "$API_URL" 2>"$FETCH_ERR") || {
     error "Failed to reach GitHub API. Check internet connection."
+    HTTPS_HINT=$(https_hint_text "$FETCH_ERR")
+    if [ -n "$HTTPS_HINT" ]; then
+        printf '%s\n' "$HTTPS_HINT" | while IFS= read -r hint_line; do error "$hint_line"; done
+    fi
+    rm -f "$FETCH_ERR"
     exit 1
 }
+rm -f "$FETCH_ERR"
 
 # The GitHub response is compact JSON. Split release objects, retain only
 # published stable releases, and use API order (newest first).

@@ -386,6 +386,22 @@ do_restart() {
 	fi
 }
 
+# Offer a restart after a change, but only on a real terminal. In a script, a
+# pipe, or an ssh session without a tty, `read` would either eat the caller's
+# stdin or block forever waiting for an answer nobody can type.
+offer_restart() {
+	local answer
+	is_running || return 0
+	echo ""
+	log_warn "Aether is running. Changes take effect on next restart."
+	[ -t 0 ] || return 0
+	printf "Restart now? [y/N]: "
+	read -r answer
+	case "$answer" in
+		y|Y|yes|YES) do_restart ;;
+	esac
+}
+
 do_status() {
 	echo ""
 	echo "=== Aether Status ==="
@@ -1638,13 +1654,7 @@ do_set() {
 	fi
 
 	if is_running; then
-		echo ""
-		log_warn "Aether is running. Changes take effect on next restart."
-		printf "Restart now? [y/N]: "
-		read -r answer
-		case "$answer" in
-			y|Y|yes|YES) do_restart ;;
-		esac
+		offer_restart
 	fi
 }
 
@@ -1662,13 +1672,7 @@ do_auto_perf() {
 	$UCI commit aether
 	log_info "Detected router RAM: set perf_profile = $prof"
 	if is_running; then
-		echo ""
-		log_warn "Aether is running. Changes take effect on next restart."
-		printf "Restart now? [y/N]: "
-		read -r answer
-		case "$answer" in
-			y|Y|yes|YES) do_restart ;;
-		esac
+		offer_restart
 	fi
 }
 

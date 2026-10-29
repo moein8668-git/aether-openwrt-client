@@ -7,6 +7,7 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 CTL="$ROOT/files/usr/bin/aether-ctl"
 INIT="$ROOT/files/etc/init.d/aether"
 WD="$ROOT/files/usr/bin/aether-watchdog"
+INSTALL="$ROOT/install.sh"
 PASS=0
 FAIL=0
 
@@ -25,6 +26,8 @@ eval "$(sed -n '/^valid_upstream() {/,/^}/p' "$INIT" | sed 's/^valid_upstream()/
 # The watchdog carries its own copy of manual_opt: test both copies.
 load_fn "$CTL" manual_opt
 eval "$(sed -n '/^manual_opt() {/,/^}/p' "$WD" | sed 's/^manual_opt()/wd_manual_opt()/')"
+# The installer explains a failed HTTPS fetch (a stale clock is the usual cause).
+load_fn "$INSTALL" https_hint_text
 
 t_ok() { # t_ok <desc> <cmd...>
 	desc="$1"; shift
@@ -180,6 +183,16 @@ t_no "padding too big" valid_tls_padding 65536
 t_no "padding text" valid_tls_padding abc
 t_no "padding empty" valid_tls_padding ''
 t_no "padding space" valid_tls_padding '6000 '
+
+# --- installer HTTPS hint (wrong router clock) --------------------------
+HINT_DIR="/tmp/aether-hint-test.$$"
+mkdir -p "$HINT_DIR"
+printf 'wget: ERROR: cannot verify api.github.com: Issued certificate not yet valid.\n' > "$HINT_DIR/cert.err"
+printf 'wget: unable to resolve host address\n' > "$HINT_DIR/net.err"
+if [ -n "$(https_hint_text "$HINT_DIR/cert.err")" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL: certificate error should produce a clock hint"; fi
+if [ -z "$(https_hint_text "$HINT_DIR/net.err")" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL: DNS error should not produce a clock hint"; fi
+if [ -z "$(https_hint_text "$HINT_DIR/missing.err")" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL: missing stderr file should not crash or hint"; fi
+rm -rf "$HINT_DIR"
 
 echo "helper tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

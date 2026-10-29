@@ -239,6 +239,14 @@ assert_contains files/usr/bin/aether-ctl '"$gool_effective" = "classic"'
 assert_contains files/usr/bin/aether-ctl '"$gool_effective" = "modern"'
 assert_contains install.sh '-lastconn.toml'
 assert_contains files/usr/bin/aether-ctl 'a number of bytes from 0 to 65535'
+# --- review fixes: non-tty prompt and stale-clock diagnosis ---------------
+assert_contains files/usr/bin/aether-ctl 'offer_restart()'
+assert_contains files/usr/bin/aether-ctl '[ -t 0 ] || return 0'
+assert_contains install.sh 'https_hint_text()'
+assert_contains install.sh 'FETCH_ERR='
+assert_contains tests/test-helpers.sh 'https_hint_text'
+# -q would swallow the wget error text the clock hint depends on.
+assert_contains install.sh 'RELEASE_JSON=$(wget -4 -T 30 -O- "$API_URL" 2>"$FETCH_ERR")'
 
 # The LuCI validators are JavaScript: exercise them when the host has node.
 # OpenWrt has no node, so this is skipped there and the shell suites stay the
